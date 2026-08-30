@@ -16,6 +16,24 @@
 #define AP_SUBNET   IPAddress(255, 255, 255, 0) // subnet mask
 
 #define WIFI_STA_TIMEOUT 15000  // 15s
+// STA reconnect backoff, see the retry block in wifi_task()
+#define WIFI_STA_RETRY_MIN_MS 10000   // first retry 10s after a failure
+#define WIFI_STA_RETRY_MAX_MS 60000   // doubles each attempt, capped at 60s
+// consecutive failed joins before falling back to the AP config portal, so a
+// bad password is still recoverable without a USB reflash
+#define WIFI_STA_MAX_FAILS 5
+
+/* Upper bound on screen transition animations, in ms.
+ *
+ * Every _ui_screen_change() call site (~40 of them, nearly all in the
+ * SquareLine-generated ui.c) hardcodes 500ms, which is slow enough to be the
+ * dominant part of how a swipe feels. Rather than editing generated files,
+ * _ui_screen_change() clamps to this -- one place to tune, and it survives
+ * regenerating ui.c. Call sites that pass 0 stay instant.
+ *
+ * Shorter also means less work: a slide transition redraws the whole screen
+ * every frame, so this is the most render-heavy thing the device does. */
+#define UI_SCREEN_ANIM_MS 180
 
 // BTT red color for UI (RGB888)
 #define LV_32BIT_BTT_RED    0xC02F30

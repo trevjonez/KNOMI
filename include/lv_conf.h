@@ -81,7 +81,10 @@
 #define LV_DISP_DEF_REFR_PERIOD 10      /*[ms]*/
 
 /*Input device read period in milliseconds*/
-#define LV_INDEV_DEF_READ_PERIOD 30     /*[ms]*/
+/* 30ms here stacked on top of the CST816S 20ms report rate and the UI task
+ * sleep, putting ~55ms in front of every touch before LVGL even sampled it.
+ * The panel reports at 10ms, so match it. */
+#define LV_INDEV_DEF_READ_PERIOD 10     /*[ms]*/
 
 /*Use a custom tick source that tells the elapsed time in milliseconds.
  *It removes the need to manually update the tick with `lv_tick_inc()`)*/
@@ -271,7 +274,9 @@
  *-----------*/
 
 /*1: Show CPU usage and FPS count*/
-#define LV_USE_PERF_MONITOR 0
+/* On to measure the render path (PSRAM draw buffer / per-pixel SPI flush)
+ * rather than guess at it. Turn back off once that work is settled. */
+#define LV_USE_PERF_MONITOR 1
 #if LV_USE_PERF_MONITOR
     #define LV_USE_PERF_MONITOR_POS LV_ALIGN_TOP_MID
 #endif

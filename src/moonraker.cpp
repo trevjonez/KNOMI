@@ -6,6 +6,7 @@
 // #define MOONRAKER_DEBUG
 
 void lv_popup_warning(const char * warning, bool clickable);
+void lv_roller_fetch_pending(void);
 
 String MOONRAKER::send_request(const char * type, String path) {
     String ip = knomi_config.moonraker_ip;
@@ -16,6 +17,10 @@ String MOONRAKER::send_request(const char * type, String path) {
     // replace all " " space to "%20" for http
     url.replace(" ", "%20");
     client.begin(url);
+    // Bound the TCP connect separately from the read. Without this a powered-off
+    // printer stalls the caller for the arduino-esp32 default connect timeout,
+    // and the 60s read timeout below applies to that wait too.
+    client.setConnectTimeout(1000);
     // set timeout to 60 seconds since some gcode like G28 need long time to feedback
     client.setTimeout(60000);
     int code = client.sendRequest(type, "");
@@ -236,6 +241,9 @@ void moonraker_task(void * parameter) {
     for(;;) {
         if (wifi_get_connect_status() == WIFI_STATUS_CONNECTED) {
             moonraker.http_get_loop();
+            // Roller list fetches, moved off the UI task so a slow or absent
+            // printer can no longer freeze the screen.
+            lv_roller_fetch_pending();
         }
         delay(200);
     }

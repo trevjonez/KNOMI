@@ -111,20 +111,24 @@ void lv_roller_set_type_settings(lv_event_t * e) {
 }
 
 
-void lv_roller_set_type_print(lv_event_t * e) {
-    String list = moonraker.send_request("GET", "/server/files/list?");
-    if (!list.isEmpty()) {
-        DynamicJsonDocument json_parse(list.length() * 2);
-        deserializeJson(json_parse, list);
-        JsonArray files = json_parse["result"].as<JsonArray>();
-        String gcodes;
-        for (JsonObject file : files) {
-            gcodes += file["path"].as<String>() + "\n";
-        }
-        strlcpy(gcode_options, gcodes.c_str(), sizeof(gcode_options));
-        gcode_options[min(sizeof(gcode_options), gcodes.length()) - 1] = 0;
-    }
+/* These two lists used to be fetched with a blocking HTTP GET from inside an
+ * LVGL event callback, i.e. on the UI task inside lv_timer_handler(). With the
+ * printer off or slow that froze the whole UI -- no touch, no animation -- for
+ * the connect timeout, and up to the 60s read timeout if the socket opened and
+ * then stalled. The fetch now runs on moonraker_task and the result is applied
+ * back on the UI task by lv_roller_poll_fetch(), so no LVGL call ever leaves
+ * the UI thread. */
+enum {
+    ROLLER_FETCH_NONE = 0,
+    ROLLER_FETCH_GCODES,
+    ROLLER_FETCH_SERVICES,
+};
+static volatile uint8_t roller_fetch_request = ROLLER_FETCH_NONE;
+static volatile uint8_t roller_fetch_ready = ROLLER_FETCH_NONE;
 
+void lv_roller_set_type_print(lv_event_t * e) {
+    strlcpy(gcode_options, "Loading...", sizeof(gcode_options));
+    roller_fetch_request = ROLLER_FETCH_GCODES;
     lv_roller_set_type(UI_ROLLER_PRINT);
 }
 
@@ -205,25 +209,71 @@ void lv_roller_preheat_clicked(lv_event_t * e, uint16_t opt_id) {
 
 String service_name_id[20];
 void lv_roller_set_service(void) {
-    String list = moonraker.send_request("GET", "/machine/system_info");
-    if (!list.isEmpty()) {
-        DynamicJsonDocument json_parse(list.length() * 2);
-        deserializeJson(json_parse, list);
-        JsonArray files = json_parse["result"]["system_info"]["available_services"].as<JsonArray>();
-        String services;
-        uint8_t i = 0;
-        for (JsonObject file : files) {
-            String option = files[i].as<String>();
-            service_name_id[i] = option;
-            option[0] = toupper(option[0]);
-            services += option + "\n";
-            i++;
+    strlcpy(service_options, "Loading...", sizeof(service_options));
+    roller_fetch_request = ROLLER_FETCH_SERVICES;
+    lv_roller_set_type(UI_ROLLER_SERVICE);
+}
+
+/* Runs on moonraker_task. Blocking HTTP is fine here; it must not touch LVGL. */
+void lv_roller_fetch_pending(void) {
+    uint8_t req = roller_fetch_request;
+    if (req == ROLLER_FETCH_NONE) return;
+    roller_fetch_request = ROLLER_FETCH_NONE;
+
+    if (req == ROLLER_FETCH_GCODES) {
+        String list = moonraker.send_request("GET", "/server/files/list?");
+        if (!list.isEmpty()) {
+            DynamicJsonDocument json_parse(list.length() * 2);
+            if (deserializeJson(json_parse, list) == DeserializationError::Ok) {
+                JsonArray files = json_parse["result"].as<JsonArray>();
+                String gcodes;
+                for (JsonObject file : files) {
+                    gcodes += file["path"].as<String>() + "\n";
+                }
+                strlcpy(gcode_options, gcodes.c_str(), sizeof(gcode_options));
+                gcode_options[min(sizeof(gcode_options), gcodes.length()) - 1] = 0;
+            }
         }
-        strlcpy(service_options, services.c_str(), sizeof(service_options));
-        service_options[min(sizeof(service_options), services.length()) - 1] = 0;
+    } else if (req == ROLLER_FETCH_SERVICES) {
+        String list = moonraker.send_request("GET", "/machine/system_info");
+        if (!list.isEmpty()) {
+            DynamicJsonDocument json_parse(list.length() * 2);
+            if (deserializeJson(json_parse, list) == DeserializationError::Ok) {
+                JsonArray files = json_parse["result"]["system_info"]["available_services"].as<JsonArray>();
+                String services;
+                uint8_t i = 0;
+                for (JsonObject file : files) {
+                    String option = files[i].as<String>();
+                    service_name_id[i] = option;
+                    option[0] = toupper(option[0]);
+                    services += option + "\n";
+                    i++;
+                }
+                strlcpy(service_options, services.c_str(), sizeof(service_options));
+                service_options[min(sizeof(service_options), services.length()) - 1] = 0;
+            }
+        }
     }
 
-    lv_roller_set_type(UI_ROLLER_SERVICE);
+    __sync_synchronize();   // publish the buffer before the ready flag
+    roller_fetch_ready = req;
+}
+
+/* Runs on the UI task, from the lvgl loop. */
+void lv_roller_poll_fetch(void) {
+    uint8_t ready = roller_fetch_ready;
+    if (ready == ROLLER_FETCH_NONE) return;
+    roller_fetch_ready = ROLLER_FETCH_NONE;
+    __sync_synchronize();
+
+    // only re-apply if that list is still the one on screen
+    if (ready == ROLLER_FETCH_GCODES && cur_menu &&
+        cur_menu->this_type == UI_ROLLER_PRINT) {
+        lv_roller_set_type(UI_ROLLER_PRINT);
+    } else if (ready == ROLLER_FETCH_SERVICES && cur_menu &&
+               cur_menu->this_type == UI_ROLLER_SERVICE) {
+        lv_roller_set_type(UI_ROLLER_SERVICE);
+    }
 }
 
 void lv_roller_setting_clicked(lv_event_t * e, uint16_t opt_id) {

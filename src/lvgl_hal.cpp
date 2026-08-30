@@ -1,5 +1,6 @@
 #include "lvgl_hal.h"
 #include "pinout.h"
+#include <esp_heap_caps.h>   // internal/DMA-capable draw buffers
 
 TFT_eSPI tft_gc9a01 = TFT_eSPI();
 #ifdef CST816S_SUPPORT
@@ -102,7 +103,7 @@ void lvgl_hal_init(void) {
 #ifdef CST816S_SUPPORT
     // touch screen
     ts_cst816s.begin();
-    ts_cst816s.setReportRate(2); // 20ms
+    ts_cst816s.setReportRate(1); // 10ms, matched to LV_INDEV_DEF_READ_PERIOD
     ts_cst816s.setReportMode(0x60); // touch + gesture generated interrupt
     ts_cst816s.setMotionMask(0); // disable motion
     ts_cst816s.setAutoRst(0); // disable auto reset
@@ -122,11 +123,44 @@ void lvgl_hal_init(void) {
 
     // tft_fps_test();
 
-    // must static
+    /* Draw buffers.
+     *
+     * This used to be a single full-screen (240x240x2 = 115KB) buffer allocated
+     * with LV_MEM_CUSTOM_ALLOC, i.e. ps_malloc, so every render wrote into PSRAM
+     * and every flush read all 115KB back out of it. PSRAM is reached over the
+     * octal bus and is far slower than internal SRAM, and LVGL's blending does
+     * scattered read-modify-write, which is its worst case.
+     *
+     * Two partial buffers in internal DMA-capable SRAM instead: smaller, much
+     * faster to touch, and double buffering lets LVGL render the next chunk
+     * while the previous one is being pushed. 40 lines is ~1/6 of the screen.
+     *
+     * Note LV_MEM_CUSTOM_ALLOC stays on ps_malloc (lv_conf.h) -- the object
+     * tree and GIF decode buffers are fine in PSRAM, it is only the hot draw
+     * path that is not. */
+    #define DRAW_BUF_LINES 40
     static lv_disp_draw_buf_t draw_buf;
-    static lv_color_t *color_buf = (lv_color_t *)LV_MEM_CUSTOM_ALLOC(TFT_WIDTH * TFT_HEIGHT * sizeof(lv_color_t));
+    const size_t draw_px = TFT_WIDTH * DRAW_BUF_LINES;
+    lv_color_t *buf1 = (lv_color_t *)heap_caps_malloc(
+        draw_px * sizeof(lv_color_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA);
+    lv_color_t *buf2 = (lv_color_t *)heap_caps_malloc(
+        draw_px * sizeof(lv_color_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA);
+
     lv_init();
-    lv_disp_draw_buf_init(&draw_buf, color_buf, NULL, TFT_WIDTH * TFT_HEIGHT);
+    if (buf1 && buf2) {
+        Serial.printf("lvgl draw buf: 2x %u px internal SRAM (%u B each)\r\n",
+                      (unsigned)draw_px, (unsigned)(draw_px * sizeof(lv_color_t)));
+        lv_disp_draw_buf_init(&draw_buf, buf1, buf2, draw_px);
+    } else {
+        // Not enough internal DRAM: fall back to the original PSRAM full-screen
+        // buffer rather than failing to boot.
+        if (buf1) heap_caps_free(buf1);
+        if (buf2) heap_caps_free(buf2);
+        Serial.println("lvgl draw buf: internal alloc failed, falling back to PSRAM");
+        static lv_color_t *color_buf = (lv_color_t *)LV_MEM_CUSTOM_ALLOC(
+            TFT_WIDTH * TFT_HEIGHT * sizeof(lv_color_t));
+        lv_disp_draw_buf_init(&draw_buf, color_buf, NULL, TFT_WIDTH * TFT_HEIGHT);
+    }
 
     /*Initialize the display*/
     // must static

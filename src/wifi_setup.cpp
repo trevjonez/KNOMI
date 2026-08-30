@@ -120,6 +120,11 @@ void knomi_factory_reset(void) {
 
 static wifi_status_t wifi_status = WIFI_STATUS_INIT;
 
+// STA reconnect backoff state, used by the retry block in wifi_task()
+static uint32_t sta_retry_at = 0;
+static uint32_t sta_retry_backoff = WIFI_STA_RETRY_MIN_MS;
+static uint8_t  sta_consecutive_fails = 0;
+
 wifi_status_t wifi_get_connect_status(void) {
     return wifi_status;
 }
@@ -222,6 +227,14 @@ restart:
         knomi_config_require &= ~WEB_POST_WIFI_CONFIG_MODE;
         wifi_mode_t last_mode = WiFi.getMode();
         WiFi.mode(wifi_mode);  /*ESP32 Access point configured*/
+        /* Arduino-esp32 applies WIFI_PS_MIN_MODEM inside WiFi.mode(), so the
+         * radio only wakes on DTIM beacons -- that is the source of the 20-650ms
+         * variable RTT seen at RSSI -35, and it is paid on every one of the
+         * several round trips the status poll makes. Must be re-asserted after
+         * each WiFi.mode() call, which is why it lives here.
+         * Costs ~80-100mA idle; this board is fed from the HBB keypad off a
+         * 24V-supplied ST7200USBM, so there is power budget to spare. */
+        WiFi.setSleep(false);
         wifi_refresh_connected();
 
         if (last_mode == WIFI_MODE_AP) {
@@ -290,10 +303,28 @@ restart:
             if (wifi_status != WIFI_STATUS_CONNECTED) {
                 Serial.println("sta connect failed!!!");
                 wifi_status = WIFI_STATUS_ERROR;
-                // reset wifi mode to "ap"
-                strlcpy(knomi_config.mode, "ap", sizeof(knomi_config.mode));
-                knomi_config_require |= WEB_POST_WIFI_CONFIG_MODE;
-                goto restart;
+                /* Previously this flipped mode to "ap" and re-entered at
+                 * `restart`, which brought up the captive portal and cleared
+                 * every request bit. Nothing in wifi_task ever re-set the STA
+                 * bit, so a single slow join (AP reboot, channel change, slow
+                 * DHCP) latched the device off the LAN until a power cycle --
+                 * and because the flip was RAM-only, a reboot "fixed" it.
+                 *
+                 * Stay in STA and let the retry in wifi_task handle it.
+                 *
+                 * Still fall back to the portal for the cases it genuinely
+                 * exists for: no SSID configured, or enough consecutive
+                 * failures that this looks like bad credentials rather than a
+                 * flaky AP. Without that bound, a wrong password would leave
+                 * no way to reconfigure short of a USB reflash. */
+                sta_consecutive_fails++;
+                if (knomi_config.sta_ssid[0] == 0 ||
+                    sta_consecutive_fails >= WIFI_STA_MAX_FAILS) {
+                    Serial.println("falling back to AP mode for reconfiguration");
+                    strlcpy(knomi_config.mode, "ap", sizeof(knomi_config.mode));
+                    knomi_config_require |= WEB_POST_WIFI_CONFIG_MODE;
+                    goto restart;
+                }
             }
             wifi_refresh_connected();
             Serial.print("sta ip: ");
@@ -345,6 +376,35 @@ void wifi_task(void * parameter) {
                 if (wifi_status == WIFI_STATUS_CONNECTED)
                     wifi_status = WIFI_STATUS_DISCONNECT;
                 break;
+        }
+
+        /* STA retry with backoff.
+         *
+         * This loop used to only *observe* the status to drive the display; it
+         * never took corrective action. Arduino-esp32's own auto-reconnect
+         * covers a narrow set of disconnect reasons and notably not the ones a
+         * UniFi AP sends on band steering, minimum-RSSI kicks or reprovision,
+         * so a dropout could sit at WL_DISCONNECTED forever.
+         *
+         * Re-arming WEB_POST_WIFI_CONFIG_STA makes the next wifi_config_loop()
+         * call WiFi.begin() again, reusing the existing join path. */
+        if (s != WL_CONNECTED &&
+            wifi_get_mode_from_string(knomi_config.mode) == WIFI_MODE_STA &&
+            knomi_config.sta_ssid[0] != 0 &&
+            (knomi_config_require & WEB_POST_WIFI_CONFIG_STA) == 0) {
+            if (millis() >= sta_retry_at) {
+                Serial.print("sta reconnect attempt, backoff ");
+                Serial.println(sta_retry_backoff);
+                knomi_config_require |= WEB_POST_WIFI_CONFIG_STA;
+                sta_retry_at = millis() + sta_retry_backoff;
+                // 10s, 20s, 40s, capped at 60s
+                sta_retry_backoff = min<uint32_t>(sta_retry_backoff * 2,
+                                                  WIFI_STA_RETRY_MAX_MS);
+            }
+        } else if (s == WL_CONNECTED) {
+            sta_retry_backoff = WIFI_STA_RETRY_MIN_MS;
+            sta_retry_at = 0;
+            sta_consecutive_fails = 0;
         }
 
         wifi_mode_t m = WiFi.getMode();

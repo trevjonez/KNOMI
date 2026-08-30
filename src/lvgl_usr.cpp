@@ -113,7 +113,9 @@ void lvgl_ui_task(void * parameter) {
 
     for(;;) {
         // lvgl task, must run in loop first.
-        lv_timer_handler();
+        // lv_timer_handler() returns how long it is safe to sleep for; a
+        // fixed delay() below it just added latency to every touch.
+        uint32_t idle_ms = lv_timer_handler();
 
         wifi_status_t status = wifi_get_connect_status();
 
@@ -134,7 +136,12 @@ void lvgl_ui_task(void * parameter) {
 
         lv_loop_auto_idle(status);
         lv_loop_btn_event();
+        lv_roller_poll_fetch();   // apply any list fetched by moonraker_task
 
-        delay(5);
+        // Cap the sleep so the loop bodies above still run promptly, but never
+        // sleep longer than LVGL says it needs. 1ms floor keeps the task
+        // yielding so lower-priority tasks (wifi, moonraker) still run.
+        if (idle_ms > 10) idle_ms = 10;
+        delay(idle_ms ? idle_ms : 1);
     }
 }

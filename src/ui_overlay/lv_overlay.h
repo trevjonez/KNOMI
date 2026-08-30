@@ -42,5 +42,8 @@ void lv_loop_btn_event(void);
 // lv_auto_goto_idle.cpp
 void touch_idle_time_clear(void);
 void lv_loop_auto_idle(wifi_status_t status);
+// lv_roller.cpp -- roller list fetch, split across tasks
+void lv_roller_fetch_pending(void);   // moonraker_task: does the blocking HTTP
+void lv_roller_poll_fetch(void);      // UI task: applies the result to LVGL
 
 #endif

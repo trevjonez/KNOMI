@@ -4,6 +4,7 @@
 // Project name: Knomi2
 
 #include "ui_helpers.h"
+#include "config.h"   // UI_SCREEN_ANIM_MS
 
 void _ui_bar_set_property(lv_obj_t * target, int id, int val)
 {
@@ -50,6 +51,11 @@ void _ui_screen_change(lv_obj_t ** target, lv_scr_load_anim_t fademode, int spd,
 {
     if(*target == NULL)
         target_init();
+    /* Clamp the transition length. See UI_SCREEN_ANIM_MS in config.h for why
+     * this is capped centrally rather than at the ~40 generated call sites.
+     * Sites that ask for 0 stay instant. */
+    if(spd > UI_SCREEN_ANIM_MS)
+        spd = UI_SCREEN_ANIM_MS;
     lv_scr_load_anim(*target, fademode, spd, delay, false);
 }
 
