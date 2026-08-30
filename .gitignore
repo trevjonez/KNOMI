@@ -1,0 +1,6 @@
+# PlatformIO build output
+.pio/
+
+# Python bytecode from tools/
+__pycache__/
+*.pyc
