@@ -3,7 +3,7 @@
 #
 #   ./tools/docker/run.sh                 build the KNOMI2 firmware
 #   ./tools/docker/run.sh firmware        same, explicitly
-#   ./tools/docker/run.sh assets          regenerate the GIFs and their .c files
+#   ./tools/docker/run.sh assets          regenerate the toolhead scene sprites
 #   ./tools/docker/run.sh shell           interactive shell
 #   ./tools/docker/run.sh <cmd> [args..]  anything else
 #
@@ -21,7 +21,7 @@ fi
 
 case "${1:-firmware}" in
     firmware) CMD=(pio run -e knomiv2) ;;
-    assets)   CMD=(bash -c 'cd tools/stealthburner && python3 build_gifs.py && python3 gen_c.py') ;;
+    assets)   CMD=(bash -c 'cd tools/stealthburner && python3 gen_sprites.py') ;;
     shell)    CMD=(bash) ;;
     *)        CMD=("$@") ;;
 esac

@@ -177,11 +177,44 @@ void MOONRAKER::get_progress(void) {
     }
 }
 
-void MOONRAKER::get_knomi_status(void) {
-    String knomi_status = send_request("GET", "/printer/objects/query?gcode_macro%20_KNOMI_STATUS");
+/* Status flags and live toolhead position, in a single request.
+ *
+ * Klipper answers a multi-object query for the same cost as a single one --
+ * measured on this printer, adding motion_report and the axis limits to the
+ * _KNOMI_STATUS query left the round trip unchanged at ~200-250ms. So the
+ * toolhead scene gets its position for free rather than needing a poll of
+ * its own, and position stays in step with the flags that select the screen.
+ *
+ * Field selection (=live_position, =axis_minimum,...) matters: a bare
+ * motion_report also returns the stepper and trapq name lists, which are
+ * several hundred bytes of JSON this never looks at. */
+void MOONRAKER::get_status_and_position(void) {
+    String knomi_status = send_request("GET",
+        "/printer/objects/query?gcode_macro%20_KNOMI_STATUS"
+        "&motion_report=live_position"
+        "&toolhead=axis_minimum,axis_maximum");
     if (!knomi_status.isEmpty()) {
         DynamicJsonDocument json_parse(knomi_status.length() * 2);
         deserializeJson(json_parse, knomi_status);
+
+        JsonVariant live = json_parse["result"]["status"]["motion_report"]["live_position"];
+        if (live.is<JsonArray>() && live.size() >= 3) {
+            for (uint8_t i = 0; i < 3; i++)
+                data.pos[i] = live[i].as<float>();
+            data.pos_valid = true;
+        }
+        JsonVariant amin = json_parse["result"]["status"]["toolhead"]["axis_minimum"];
+        JsonVariant amax = json_parse["result"]["status"]["toolhead"]["axis_maximum"];
+        if (amin.is<JsonArray>() && amin.size() >= 3 && amax.is<JsonArray>() && amax.size() >= 3) {
+            for (uint8_t i = 0; i < 3; i++) {
+                data.axis_min[i] = amin[i].as<float>();
+                data.axis_max[i] = amax[i].as<float>();
+            }
+            // guard against a degenerate bed that would divide by zero downstream
+            data.bounds_valid = (data.axis_max[0] > data.axis_min[0]) &&
+                                (data.axis_max[1] > data.axis_min[1]);
+        }
+
         data.homing = json_parse["result"]["status"]["gcode_macro _KNOMI_STATUS"]["homing"].as<bool>();
         data.probing = json_parse["result"]["status"]["gcode_macro _KNOMI_STATUS"]["probing"].as<bool>();
         data.qgling = json_parse["result"]["status"]["gcode_macro _KNOMI_STATUS"]["qgling"].as<bool>();
@@ -200,18 +233,36 @@ void MOONRAKER::get_knomi_status(void) {
         Serial.println(data.heating_bed);
 #endif
     } else {
-        Serial.println("Empty: moonraker: get_knomi_status");
+        Serial.println("Empty: moonraker: get_status_and_position");
     }
+}
+
+/* While the live toolhead scene is on screen, position is the only thing
+ * displayed that changes, so drop everything else out of the cycle: the ready
+ * flag and the temperatures are not on that screen, and each extra query is a
+ * full ~200ms round trip against Moonraker. Three requests per cycle gives the
+ * scene ~1.2Hz, which steps visibly; one gives ~4Hz, which tracks.
+ *
+ * Nothing is lost by skipping get_printer_ready() here -- a failed GET still
+ * sets unconnected from inside send_request(), and the state flags that end
+ * this branch come from the one query that is still being made. */
+static inline bool live_scene_state(const moonraker_data_t & d) {
+    return d.probing || d.qgling;
 }
 
 void MOONRAKER::http_get_loop(void) {
     data_unlock = false;
+    if (live_scene_state(data)) {
+        get_status_and_position();
+        data_unlock = true;
+        return;
+    }
     get_printer_ready();
     if (!unready) {
-        // get_knomi_status() must before get_printer_info()
+        // get_status_and_position() must before get_printer_info()
         // avoid homing, qgling, etc action flag = 1
         // but printing flag has not refresh
-        get_knomi_status();
+        get_status_and_position();
         get_printer_info();
         if (data.printing) {
             get_progress();
@@ -245,7 +296,10 @@ void moonraker_task(void * parameter) {
             // printer can no longer freeze the screen.
             lv_roller_fetch_pending();
         }
-        delay(200);
+        // The toolhead scene wants position as fast as the printer will answer
+        // (the request itself already costs ~200ms); everything else is fine at
+        // the original cadence.
+        delay(live_scene_state(moonraker.data) ? 20 : 200);
     }
 }
 

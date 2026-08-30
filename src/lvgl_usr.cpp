@@ -78,6 +78,10 @@ void lvgl_ui_task(void * parameter) {
     lv_gif_set_src(ui_img_main_gif, gif_idle[0]);
     lv_obj_align(ui_img_main_gif, LV_ALIGN_CENTER, 0, 0);
 
+    // Live toolhead scene, shares this screen with the gif above and takes it
+    // over during probing / qgling. Created after it so it draws on top.
+    lv_toolhead_scene_init(ui_ScreenMainGif);
+
     // Add welcome gif
     lv_obj_t * img_welcome_gif = lv_gif_create(ui_ScreenWelcome);
     lv_gif_set_src(img_welcome_gif, &gif_welcome);

@@ -4,3 +4,6 @@
 # Python bytecode from tools/
 __pycache__/
 *.pyc
+
+# Generated preview, regenerate with tools/stealthburner/preview_scene.py
+tools/stealthburner/preview_scene.png

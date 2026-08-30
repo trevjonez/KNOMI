@@ -10,8 +10,6 @@ LV_IMG_DECLARE(gif_welcome);
 LV_IMG_DECLARE(gif_voron);
 LV_IMG_DECLARE(gif_standby);
 LV_IMG_DECLARE(gif_homing);
-LV_IMG_DECLARE(gif_probing);
-LV_IMG_DECLARE(gif_qgling);
 LV_IMG_DECLARE(gif_heated);
 LV_IMG_DECLARE(gif_print);
 LV_IMG_DECLARE(gif_print_ok);
@@ -45,5 +43,9 @@ void lv_loop_auto_idle(wifi_status_t status);
 // lv_roller.cpp -- roller list fetch, split across tasks
 void lv_roller_fetch_pending(void);   // moonraker_task: does the blocking HTTP
 void lv_roller_poll_fetch(void);      // UI task: applies the result to LVGL
+// lv_toolhead_scene.cpp -- live position scene, replaces the probing/qgling gifs
+void lv_toolhead_scene_init(lv_obj_t * parent);
+void lv_toolhead_scene_set_active(bool active);
+void lv_toolhead_scene_update(void);
 
 #endif

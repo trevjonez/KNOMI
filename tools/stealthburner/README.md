@@ -1,11 +1,13 @@
-# StealthBurner busy-state icons
+# StealthBurner toolhead scene
 
-Redraws the `PROBING` and `QGLING` animations so the toolhead reads as a
-Voron StealthBurner instead of the stock BTT nozzle icon.
+Replaces the `PROBING` and `QGLING` animations with a scene composited at
+runtime from the printer's **real toolhead position**, drawn as a Voron
+StealthBurner instead of the stock BTT nozzle icon.
 
-Only the **head** is replaced. The bed art, the frame count, the per-frame
-delays and the motion are the originals', so the animations play exactly as
-before.
+The originals were canned loops: a head bouncing along a fixed path that had
+nothing to do with what the machine was doing. This ships sprites instead of
+frames, and the firmware places them — see
+`src/ui_overlay/lv_toolhead_scene.cpp`.
 
 ## Geometry
 
@@ -28,18 +30,42 @@ cleaned up:
 
 Tunables on `draw()`: `logo_scale`, `hex_round`, `face_margin`, `smooth`.
 
+## The projection
+
+The bed is the original `gif_qgling` artwork with the toolhead erased. Its
+top face is a trapezoid, and that trapezoid *is* the projection: printer X/Y
+maps onto it, and the head foreshortens by exactly the factor the bed does
+(half-width at the back over half-width at the front).
+
+`gen_sprites.py` measures the trapezoid off the artwork rather than having
+it typed in, and writes the corners into `toolhead_scene.h` beside the
+sprites, so the C side follows automatically if the bed art is ever redrawn.
+The head is rendered once per 1px step of apparent height — discrete sprites
+rather than a runtime `lv_img_set_zoom()`, so the pixel art stays crisp and
+the draw stays a plain blit.
+
 ## Rebuilding
 
-    python3 build_gifs.py     # reads the originals from master:KNOMI_GIF/
-    python3 gen_c.py          # writes ../../src/gif/gif_{probing,qgling}.c
+    python3 gen_sprites.py     # -> ../../src/sprites/toolhead_scene.{c,h}
+    python3 preview_scene.py   # -> preview_scene.png, off-device check
 
-Needs `pillow`, `numpy`, `scipy`.
+Needs `pillow`, `numpy`, `scipy`. Both run in the build container:
+`./tools/docker/run.sh assets`.
 
-`gen_c.py` emits the same shape the other generated files use: the raw `.gif`
-bytes in an `lv_img_dsc_t` marked `LV_IMG_CF_RAW_CHROMA_KEYED`, which LVGL's
-own GIF decoder (`LV_USE_GIF`) plays back via the `lv_gif` widget. No symbol
-names change, so `lv_overlay.h` and `lv_moonraker_change_screen.cpp` are
-untouched.
+`preview_scene.py` mirrors `scene_apply()` in the firmware so the geometry
+can be checked without a flash cycle — it renders the bed corners and a Z
+sweep, and reports how close each lands to the round display's 120px radius.
+It is a preview, not the source of truth; if the C maths changes, change it
+too.
 
-Frames are written whole with `disposal=2`; delta frames would ghost against
-the transparent background.
+## History
+
+Before this, the same art was composited into replacement **GIFs** — the
+head swapped into every original frame, bed and timing untouched. Two
+things that cost real time there and are worth not rediscovering:
+`gif_qgling` scales the toolhead across 13 sizes as it travels back/front,
+so the head had to be re-rendered per frame rather than pasted at one size;
+and frames had to be written whole with `disposal=2`, because against a
+transparent background delta frames ghost the previous head. Both are moot
+now that placement is done at runtime, but `build_gifs.py` and `gen_c.py`
+are in git history if that path is ever wanted back.

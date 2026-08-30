@@ -89,6 +89,12 @@ bool moonraker_bed_is_heating(void) {
 void lv_loop_moonraker_change_screen(void) {
 
     static lv_screen_state_t screen_state = LV_SCREEN_STATE_INIT;
+
+    /* The probing and qgling states draw the live toolhead scene instead of a
+     * gif. One place decides that, so the scene can never be left up after the
+     * state it belongs to has ended. */
+    lv_toolhead_scene_set_active(moonraker.data.probing || moonraker.data.qgling);
+
     // if (moonraker.data.printing) {
     //     if (lv_screen_state == 0) {
     //         lv_goto_busy_screen(ui_ScreenPrinting, LV_MOONRAKER_STATE_PRINTING, NULL);
@@ -99,12 +105,15 @@ void lv_loop_moonraker_change_screen(void) {
         lv_goto_busy_screen(ui_ScreenMainGif, LV_MOONRAKER_STATE_HOMING, &gif_homing);
         return;
     }
+    // NULL gif: the scene owns what is drawn here, not lv_gif
     if (moonraker.data.probing) {
-        lv_goto_busy_screen(ui_ScreenMainGif, LV_MOONRAKER_STATE_PROBING, &gif_probing);
+        lv_goto_busy_screen(ui_ScreenMainGif, LV_MOONRAKER_STATE_PROBING, NULL);
+        lv_toolhead_scene_update();
         return;
     }
     if (moonraker.data.qgling) {
-        lv_goto_busy_screen(ui_ScreenMainGif, LV_MOONRAKER_STATE_QGLING, &gif_qgling);
+        lv_goto_busy_screen(ui_ScreenMainGif, LV_MOONRAKER_STATE_QGLING, NULL);
+        lv_toolhead_scene_update();
         return;
     }
     if (moonraker_nozzle_is_heating()) {

@@ -21,6 +21,21 @@ typedef struct {
     uint8_t progress;
     char file_path[32];
 
+    /* Live toolhead position and the bed's own extents, both in mm.
+     *
+     * pos comes from motion_report.live_position, which is where the toolhead
+     * actually is right now, not toolhead.position (the last *commanded*
+     * point, which runs ahead of real motion while a move is queued).
+     *
+     * axis_min/axis_max are static for a given printer but are read from it
+     * rather than assumed, so the scene is correct on any bed size. They stay
+     * invalid until the first successful query. */
+    float pos[3];
+    float axis_min[3];
+    float axis_max[3];
+    bool pos_valid;
+    bool bounds_valid;
+
     bool pause;
     bool printing;    // is klipper in a printing task (including printing, pausing, paused, cancelling)
     bool homing;
@@ -55,7 +70,7 @@ class MOONRAKER {
         void get_printer_ready(void);
         void get_printer_info(void);
         void get_progress(void);
-        void get_knomi_status(void);
+        void get_status_and_position(void);
 };
 
 extern MOONRAKER moonraker;
