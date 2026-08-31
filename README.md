@@ -6,6 +6,7 @@
 >
 > - [docs/fork-notes.md](docs/fork-notes.md) — what changed, how to build and flash
 > - [docs/toolhead-scene.md](docs/toolhead-scene.md) — the live toolhead scene
+> - [klipper/](klipper/README.md) — the Klipper config and extra it can use
 > - [tools/stealthburner/](tools/stealthburner/README.md) — the generated art
 >
 > Upstream: <https://github.com/bigtreetech/KNOMI>

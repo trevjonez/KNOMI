@@ -97,7 +97,8 @@ that ever needs to be distinguishable remotely.
 
 ## Klipper side
 
-Two optional additions, both in `trevjonez/klipper-configs`:
+Both live in [`klipper/`](../klipper/README.md) in this repo. `KNOMI.cfg` there
+is a superset of BTT's stock one and a drop-in replacement for it:
 
 * **`_KNOMI_HOME_INFO`** publishes homing speeds out of the live `printer.cfg`
   so the display need not assume them. Without it the firmware falls back to
@@ -109,4 +110,6 @@ Two optional additions, both in `trevjonez/klipper-configs`:
   status is served and the second how often position is recomputed. Changing
   only one makes clients fetch the same value more often and improves nothing.
 
-Neither is required; stock `KNOMI.cfg` works.
+Neither is required; stock `KNOMI.cfg` works. Note the extra needs
+`systemctl restart klipper`, not `FIRMWARE_RESTART`, which does not re-import
+Python modules.
