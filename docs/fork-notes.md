@@ -60,6 +60,21 @@ pixels without byte-swapping. It would also silently corrupt all 28 generated
 sometimes cited as the reason to do it is a different overload, for 3-byte RGB
 displays; `pushSwapBytePixels` already batches 32px per 512-bit transaction.
 
+**Updating the dependency versions.** Deliberately not done. `platformio.ini`
+pins `espressif32@6.4.0`, `lvgl 8.3.7`, `ArduinoJson ^6.19.4` and
+`TFT_eSPI 2.5.0`, all years old, and the platform pin in particular is where
+IDF/lwIP/mbedTLS security fixes would arrive.
+
+It is left alone because the payoff is speculative and the risk is not. Upstream
+pinned `espressif32@6.4.0` on purpose in `791673f` to fix a black screen, so a
+platform bump is the most likely thing to break the display outright.
+ArduinoJson 7 is a breaking API change touching five call sites in
+`moonraker.cpp`. LVGL 9 is a rewrite; 8.4 is minor and would at least supply a
+real `lv_gif_pause()` in place of the widget-struct workaround here.
+
+If it is ever revisited, it wants to be its own pass with a flash and a
+hardware check after each bump, not a batch version edit.
+
 ## Building
 
 Neither PlatformIO nor the ESP32 toolchain needs to be on the host:
