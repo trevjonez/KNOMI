@@ -89,12 +89,25 @@
 /* Where the head floats while Z is still unknown, mm. */
 #define SCENE_HOME_Z_MM         15.0f
 
-/* A jump larger than the axis could have travelled between two samples means
- * the endstop triggered and Klipper snapped the position to the real one.
- * Generous multiple of speed x interval, with a floor so a slow axis sampled
- * quickly still has room for ordinary jitter. */
+/* Apparent speed above homing_speed x this means the endstop triggered and
+ * Klipper replaced the ramp with the real position.
+ *
+ * Measured against the time since the value last CHANGED, never since the last
+ * sample. Klipper recomputes live_position on its own ~250ms cycle
+ * (STATUS_REFRESH_TIME in extras/motion_report.py) and serves a cached value in
+ * between, so polling faster than that returns runs of identical values
+ * followed by one full-size step. Measured per sample, an ordinary 40mm/s
+ * homing move looks like 120mm/s when sampled at 3x the rate the value
+ * updates -- which tripped this detector mid-sweep, dropped the ramp, relatched
+ * at the current position and threw the head back to its start. Measured
+ * per change it reads 40mm/s at any sample rate. */
 #define SCENE_HOME_SNAP_FACTOR   3.0f
-#define SCENE_HOME_SNAP_MIN_MM   5.0f
+
+/* How far outside its own limits a reading must be to count as Klipper's
+ * force-set coordinate, mm. That value sits ~1.5x the axis travel outside, so
+ * any small margin separates it -- but the margin is load-bearing, see the
+ * latch test in homing_target(). */
+#define SCENE_HOME_FORCEPOS_MARGIN_MM  2.0f
 
 typedef struct {
     float u;    // 0..1 across the bed, left to right
@@ -332,18 +345,17 @@ void lv_toolhead_scene_set_mode(toolhead_scene_mode_t mode) {
 
 /* Per-axis reconstruction state for a homing move. */
 typedef struct {
-    bool  ramping;      // Klipper has force-set this axis and is homing it
-    float origin;       // the force-set reading the ramp started from
-    float start;        // where the toolhead really was at that moment
-    float prev;         // previous live reading, for snap detection
+    bool  ramping;          // Klipper has force-set this axis and is homing it
+    float origin;           // the force-set reading the ramp started from
+    float start;            // where the toolhead really was at that moment
+    float prev;             // last reading that DIFFERED, for snap detection
+    uint32_t prev_change_ms;// when it differed, so speed is per change not per sample
     bool  have_prev;
 } home_axis_t;
 static home_axis_t home_axis[3];
-static uint32_t home_prev_ms = 0;
 
 static void home_reset(void) {
     memset(home_axis, 0, sizeof(home_axis));
-    home_prev_ms = 0;
 }
 
 static float home_speed(uint8_t axis) {
@@ -392,9 +404,6 @@ static float home_start(uint8_t axis) {
 static scene_pos_t homing_target(void) {
     const moonraker_data_t & d = moonraker.data;
     uint32_t now = millis();
-    float dt = home_prev_ms ? (now - home_prev_ms) / 1000.0f : 0.25f;
-    if (dt <= 0.0f || dt > 2.0f) dt = 0.25f;
-    home_prev_ms = now;
 
     float out[3];
     for (uint8_t i = 0; i < 3; i++) {
@@ -402,24 +411,41 @@ static scene_pos_t homing_target(void) {
         float p = d.pos[i];
         home_axis_t * a = &home_axis[i];
 
-        /* A step no axis could physically make means the endstop tripped and
+        /* A speed no axis could physically reach means the endstop tripped and
          * Klipper replaced the fiction with the truth. From here the reading
          * is real -- which also matters for what follows, since G28 moves to
-         * bed centre before homing Z. */
-        if (a->ramping && a->have_prev) {
-            float limit = home_speed(i) * dt * SCENE_HOME_SNAP_FACTOR;
-            if (limit < SCENE_HOME_SNAP_MIN_MM) limit = SCENE_HOME_SNAP_MIN_MM;
-            if (fabsf(p - a->prev) > limit) a->ramping = false;
+         * bed centre before homing Z.
+         *
+         * Only evaluated when the value actually changes, so the rate is real
+         * regardless of how far ahead of Klipper's position cache we poll. */
+        bool just_snapped = false;
+        if (p != a->prev || !a->have_prev) {
+            if (a->have_prev) {
+                float gap = (now - a->prev_change_ms) / 1000.0f;
+                if (gap < 0.001f) gap = 0.001f;
+                if (a->ramping &&
+                    fabsf(p - a->prev) / gap > home_speed(i) * SCENE_HOME_SNAP_FACTOR) {
+                    a->ramping = false;
+                    just_snapped = true;
+                }
+            }
+            a->prev = p;
+            a->prev_change_ms = now;
+            a->have_prev = true;
         }
-        // outside its own limits, an axis can only be mid force-set ramp
-        if (!a->ramping && (p < lo || p > hi)) {
+        /* Far enough outside its own limits to be Klipper's force-set
+         * coordinate, which sits ~1.5x the axis travel out. The margin matters:
+         * position_endstop equals position_max here, so the value snapped to on
+         * a trigger lands a float-hair above the maximum and would otherwise be
+         * read as a fresh force-set. Never on the sample that just snapped --
+         * unlatching and relatching in one pass is always wrong. */
+        if (!a->ramping && !just_snapped &&
+            (p < lo - SCENE_HOME_FORCEPOS_MARGIN_MM ||
+             p > hi + SCENE_HOME_FORCEPOS_MARGIN_MM)) {
             a->ramping = true;
             a->origin = p;
             a->start = d.last_known_valid[i] ? d.last_known[i] : (lo + hi) * 0.5f;
         }
-        a->prev = p;
-        a->have_prev = true;
-
         out[i] = a->ramping ? clampf(a->start + (p - a->origin), lo, hi) : p;
     }
 
