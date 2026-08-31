@@ -95,6 +95,8 @@ class MOONRAKER {
         bool post_to_queue(String path);
         bool post_gcode_to_queue(String gcode);
         String send_request(const char * type, String path);
+        // keep-alive variant, safe only from moonraker_task -- see moonraker.cpp
+        String request(const char * type, String path, bool keepalive);
 
     private:
         post_queue_t post_queue;

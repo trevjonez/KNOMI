@@ -8,15 +8,44 @@
 void lv_popup_warning(const char * warning, bool clickable);
 void lv_roller_fetch_pending(void);
 
+/* A connection held open across polls, for the status path only.
+ *
+ * Every request used to build its own HTTPClient, so every sample paid a TCP
+ * handshake. That was invisible while Klipper's 250ms status tick dominated
+ * the round trip, but once the tick is shortened (see _KNOMI_QUERY_RATE in
+ * voron_knomi.cfg) the handshake becomes the limiting cost -- and it also
+ * wakes the radio for a full exchange the poll does not need.
+ *
+ * Only the status path uses it, and that path lives entirely in
+ * moonraker_task. POSTs run on moonraker_post_task and keep their own
+ * short-lived client: one HTTPClient cannot be driven from two tasks.
+ *
+ * Note this is never end()ed on the happy path. HTTPClient::end() closes the
+ * socket regardless of setReuse(), so calling it is exactly what defeats
+ * keep-alive. It IS called on failure, so a printer that went away cannot
+ * leave a wedged socket behind. */
+static WiFiClient keepalive_tcp;
+static HTTPClient keepalive_http;
+
 String MOONRAKER::send_request(const char * type, String path) {
+    return request(type, path, false);
+}
+
+String MOONRAKER::request(const char * type, String path, bool keepalive) {
     String ip = knomi_config.moonraker_ip;
     String port = knomi_config.moonraker_port;
     String url = "http://" + ip + ":" + port + path;
     String response = "";
-    HTTPClient client;
+    HTTPClient local;
+    HTTPClient & client = keepalive ? keepalive_http : local;
     // replace all " " space to "%20" for http
     url.replace(" ", "%20");
-    client.begin(url);
+    if (keepalive) {
+        client.setReuse(true);
+        client.begin(keepalive_tcp, url);
+    } else {
+        client.begin(url);
+    }
     // Bound the TCP connect separately from the read. Without this a powered-off
     // printer stalls the caller for the arduino-esp32 default connect timeout,
     // and the 60s read timeout below applies to that wait too.
@@ -53,7 +82,12 @@ String MOONRAKER::send_request(const char * type, String path) {
             unconnected = true;
         Serial.printf("moonraker http %s error.\r\n", type);
     }
-    client.end(); //Free the resources
+    /* end() closes the socket whatever setReuse() says, so on the keep-alive
+     * path it is only for tearing a broken connection down -- the next request
+     * then reconnects cleanly. Calling it after a good response would undo the
+     * whole point. */
+    if (!keepalive || code <= 0)
+        client.end(); //Free the resources
 
 #ifdef MOONRAKER_DEBUG
     Serial.printf("\r\n\r\n %s code:%d************ %s *******************\r\n\r\n", type, code, url.c_str());
@@ -95,7 +129,7 @@ bool MOONRAKER::post_gcode_to_queue(String gcode) {
 }
 
 void MOONRAKER::get_printer_ready(void) {
-    String webhooks = send_request("GET", "/printer/objects/query?webhooks");
+    String webhooks = request("GET", "/printer/objects/query?webhooks", true);
     if (!webhooks.isEmpty()) {
         DynamicJsonDocument json_parse(webhooks.length() * 2);
         deserializeJson(json_parse, webhooks);
@@ -112,7 +146,7 @@ void MOONRAKER::get_printer_ready(void) {
 }
 
 void MOONRAKER::get_printer_info(void) {
-    String printer_info = send_request("GET", "/api/printer");
+    String printer_info = request("GET", "/api/printer", true);
     if (!printer_info.isEmpty()) {
         DynamicJsonDocument json_parse(printer_info.length() * 2);
         deserializeJson(json_parse, printer_info);
@@ -158,7 +192,7 @@ const char * path_only_gcode(const char * path)
 }
 
 void MOONRAKER::get_progress(void) {
-    String display_status = send_request("GET", "/printer/objects/query?virtual_sdcard");
+    String display_status = request("GET", "/printer/objects/query?virtual_sdcard", true);
     if (!display_status.isEmpty()) {
         DynamicJsonDocument json_parse(display_status.length() * 2);
         deserializeJson(json_parse, display_status);
@@ -196,11 +230,11 @@ void MOONRAKER::get_progress(void) {
  * motion_report also returns the stepper and trapq name lists, which are
  * several hundred bytes of JSON this never looks at. */
 void MOONRAKER::get_status_and_position(void) {
-    String knomi_status = send_request("GET",
+    String knomi_status = request("GET",
         "/printer/objects/query?gcode_macro%20_KNOMI_STATUS"
         "&motion_report=live_position"
         "&toolhead=axis_minimum,axis_maximum,homed_axes"
-        "&gcode_macro%20_KNOMI_HOME_INFO");
+        "&gcode_macro%20_KNOMI_HOME_INFO", true);
     if (!knomi_status.isEmpty()) {
         DynamicJsonDocument json_parse(knomi_status.length() * 2);
         deserializeJson(json_parse, knomi_status);
