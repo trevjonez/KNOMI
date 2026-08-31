@@ -274,9 +274,11 @@
  *-----------*/
 
 /*1: Show CPU usage and FPS count*/
-/* On to measure the render path (PSRAM draw buffer / per-pixel SPI flush)
- * rather than guess at it. Turn back off once that work is settled. */
-#define LV_USE_PERF_MONITOR 1
+/* Off: the render work it was turned on for is settled -- internal-SRAM draw
+ * buffers and the 180ms transition cap measured out at 100 FPS, the refresh
+ * cap, with headroom to spare. Turn it back on before touching the draw path
+ * again; network latency is far too noisy to measure any of this remotely. */
+#define LV_USE_PERF_MONITOR 0
 #if LV_USE_PERF_MONITOR
     #define LV_USE_PERF_MONITOR_POS LV_ALIGN_TOP_MID
 #endif
