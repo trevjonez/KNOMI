@@ -5,7 +5,7 @@ image it replaced is kept beside it as `knomi2_firmware_stock.bin`.
 
 | File | MD5 | Size | What it is |
 |---|---|---|---|
-| `knomi2_firmware.bin` | `6fd07e6a03937f3a23629cd9cd60d337` | 2,792,576 | this fork |
+| `knomi2_firmware.bin` | `95f289efe79e79093a7a9162fd1f2ffc` | 2,793,232 | this fork |
 | `knomi2_firmware_stock.bin` | `9d4f51d727c510d6a3cad2985d065852` | 2,921,248 | BTT's original |
 | `knomi2_bootloader.bin` | `f2a433bfb512f5aa8dd3e45e3ab091cb` | 15,088 | unchanged from BTT |
 | `knomi2_partitions.bin` | `f5ddd8b6ba813771c150ab2df51efa1d` | 3,072 | unchanged from BTT |
@@ -20,7 +20,8 @@ untouched and there is no need to reflash them.
 bed-and-toolhead scene composited from the printer's **real toolhead position**,
 with the toolhead drawn as a Voron StealthBurner. Also included: much faster
 screen transitions, bounded WiFi recovery instead of stock's one-strike flip to
-AP mode, and assorted responsiveness fixes.
+AP mode, a Moonraker connection held open across polls rather than a TCP
+handshake per sample, and assorted responsiveness fixes.
 
 Details: [`docs/fork-notes.md`](https://github.com/trevjonez/KNOMI/blob/stealthburner-icons/docs/fork-notes.md)
 and [`docs/toolhead-scene.md`](https://github.com/trevjonez/KNOMI/blob/stealthburner-icons/docs/toolhead-scene.md)
@@ -49,8 +50,13 @@ what you have.
 
 ## Klipper side
 
-Works with the stock `KNOMI.cfg`. The homing animation is more accurate if you
-also add the optional `_KNOMI_HOME_INFO` macro, which publishes homing speeds
-out of your live `printer.cfg` so the display does not have to assume them —
-see `docs/toolhead-scene.md`. Without it, the firmware falls back to Voron 2.4
-defaults.
+Works with the stock `KNOMI.cfg`. Two optional additions improve the animation,
+both described in `docs/toolhead-scene.md`:
+
+* `_KNOMI_HOME_INFO` publishes your homing speeds out of the live
+  `printer.cfg`, so the display need not assume them. Without it the firmware
+  falls back to Voron 2.4 defaults.
+* `knomi_query_refresh`, a small Klipper extra, lets a macro shorten Klipper's
+  status refresh period for the span of an animated state. That period is the
+  rate printer status comes into existence, so it caps the animation at ~3.5Hz
+  by default no matter how the display asks for it.
