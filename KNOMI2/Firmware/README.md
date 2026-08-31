@@ -5,7 +5,7 @@ image it replaced is kept beside it as `knomi2_firmware_stock.bin`.
 
 | File | MD5 | Size | What it is |
 |---|---|---|---|
-| `knomi2_firmware.bin` | `95f289efe79e79093a7a9162fd1f2ffc` | 2,793,232 | this fork |
+| `knomi2_firmware.bin` | `786cbf1df65ff5e41e23559130d0c36b` | 2,793,264 | this fork |
 | `knomi2_firmware_stock.bin` | `9d4f51d727c510d6a3cad2985d065852` | 2,921,248 | BTT's original |
 | `knomi2_bootloader.bin` | `f2a433bfb512f5aa8dd3e45e3ab091cb` | 15,088 | unchanged from BTT |
 | `knomi2_partitions.bin` | `f5ddd8b6ba813771c150ab2df51efa1d` | 3,072 | unchanged from BTT |
@@ -50,7 +50,8 @@ what you have.
 
 ## Klipper side
 
-Works with the stock `KNOMI.cfg`. Two optional additions improve the animation,
+Works with the stock `KNOMI.cfg`, but the repo ships a superset in
+`klipper/` that is a drop-in replacement and enables the two additions below. Two optional additions improve the animation,
 both described in `docs/toolhead-scene.md`:
 
 * `_KNOMI_HOME_INFO` publishes your homing speeds out of the live
