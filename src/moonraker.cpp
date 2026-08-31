@@ -181,9 +181,16 @@ void MOONRAKER::get_progress(void) {
  *
  * Klipper answers a multi-object query for the same cost as a single one --
  * measured on this printer, adding motion_report and the axis limits to the
- * _KNOMI_STATUS query left the round trip unchanged at ~200-250ms. So the
+ * _KNOMI_STATUS query left the round trip unchanged at ~250ms. So the
  * toolhead scene gets its position for free rather than needing a poll of
  * its own, and position stays in step with the flags that select the screen.
+ *
+ * That is not a coincidence. objects/query does not run when it arrives: it
+ * queues and waits for Klipper's subscription tick (SUBSCRIPTION_REFRESH_TIME
+ * = .25 in klippy/webhooks.py), and one tick serves every waiting client and
+ * every object in one pass, calling get_status() once per object however many
+ * asked. So the cost is per REQUEST, not per object -- which is why bundling
+ * is free and why sequential requests are so expensive.
  *
  * Field selection (=live_position, =axis_minimum,...) matters: a bare
  * motion_report also returns the stepper and trapq name lists, which are
@@ -290,8 +297,14 @@ void MOONRAKER::get_status_and_position(void) {
 /* While the live toolhead scene is on screen, position is the only thing
  * displayed that changes, so drop everything else out of the cycle: the ready
  * flag and the temperatures are not on that screen, and each extra query is a
- * full ~200ms round trip against Moonraker. Three requests per cycle gives the
- * scene ~1.2Hz, which steps visibly; one gives ~4Hz, which tracks.
+ * full ~250ms round trip. Three requests per cycle gives the scene ~1.2Hz,
+ * which steps visibly; one gives ~4Hz, which tracks.
+ *
+ * The 250ms is Klipper's status refresh period, not network or Moonraker
+ * latency (Moonraker's own endpoints answer in ~6ms, and querying klippy.sock
+ * directly is identical). Each request waits for the next tick, so N
+ * sequential requests cost N x 250ms no matter how little each one asks for.
+ * 4Hz is the ceiling for everyone; polling harder gains nothing.
  *
  * Nothing is lost by skipping get_printer_ready() here -- a failed GET still
  * sets unconnected from inside send_request(), and the state flags that end
@@ -347,7 +360,7 @@ void moonraker_task(void * parameter) {
             lv_roller_fetch_pending();
         }
         // The toolhead scene wants position as fast as the printer will answer
-        // (the request itself already costs ~200ms); everything else is fine at
+        // (the request itself already costs ~250ms); everything else is fine at
         // the original cadence.
         delay(live_scene_state(moonraker.data) ? 20 : 200);
     }

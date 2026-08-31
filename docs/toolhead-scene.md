@@ -39,15 +39,109 @@ Two things worth knowing about that URL:
 - **Field selection matters.** A bare `motion_report` also returns the stepper
   and trapq name lists, several hundred bytes nothing here reads.
 
-Klipper answers a multi-object query for the same ~200–250ms as a single one,
-so position costs no extra request. The *cycle* did need work, though: three
+Klipper answers a multi-object query for the same ~250ms as a single one, so
+position costs no extra request. The *cycle* did need work, though: three
 sequential queries gave the scene ~1.2Hz, which steps visibly. While the scene
 is up, `http_get_loop()` makes only this one query — the ready flag and
 temperatures are not on that screen — which reaches ~4Hz. Samples are eased
 into, with the easing time tracking the measured interval, so a slower printer
 stretches the motion instead of stalling.
 
-It still trails reality by ~250ms. Moonraker's own response time is the floor.
+## Why a query costs 250ms, and why 4Hz is the ceiling
+
+Worth understanding before trying to make the scene smoother, because the
+obvious optimisations do nothing.
+
+`objects/query` takes ~250ms. **Neither the network nor Moonraker is
+responsible.** Measured on a Pi 4 at load 0.30:
+
+| | |
+|---|---|
+| TCP connect | 0.2 ms |
+| `/server/info` (Moonraker only, no Klippy) | 5.7 ms |
+| Klippy `info` direct on its unix socket | 0.2 ms |
+| Klippy `objects/list` direct | 1.3 ms |
+| Klippy `objects/query` direct | **250.8 ms** |
+
+Bypassing Moonraker entirely and talking to `klippy.sock` gives the identical
+quantum, so it is Klipper, and it is one specific endpoint.
+
+The cause is `SUBSCRIPTION_REFRESH_TIME = .25` in `klippy/webhooks.py`. A
+one-shot query appends itself to `pending_queries` and then blocks:
+
+```python
+self.pending_queries.append((None, objects, complete.complete, {}))
+if self.query_timer is None:                    # only when absent
+    qt = reactor.register_timer(self._do_query, reactor.NOW)
+msg = complete.wait()                           # waits for the tick
+```
+
+It only gets an immediate `NOW` timer **if no timer already exists**. Moonraker
+holds a permanent subscription, so one always does, and the query waits for the
+next 250ms tick. Confirmed by prediction: sleep N ms before querying and
+latency is `250 − N`, measured within 1ms at N = 0/50/100/150/200.
+
+This is deliberate, and it is protection rather than throttling. In
+`_do_query`, all subscribers and all pending queries are merged into one pass;
+results go into a shared per-tick `query` dict consulted before any object is
+touched, so ten clients asking for `toolhead` cost exactly **one**
+`get_status()`. The whole pass runs inside `reactor.assert_no_pause()`, so
+status collection cannot yield into motion-critical work. Subscribers receive
+only changed fields. A query storm therefore cannot make Klipper do more work —
+extra clients ride the tick that was already scheduled.
+
+**So 4Hz is not a limit imposed on us, it is the granularity of Klipper's
+status for everyone.** Polling harder just queues more waiters onto the same
+tick. The scene can be up to 250ms stale, and no faster host, network or
+Moonraker changes that.
+
+### If it ever needs to be faster
+
+Two levers, and they compose in one order only.
+
+**Subscribe instead of poll.** Measured against `printer.objects.subscribe`
+while the toolhead was moving: pushes arrive every **251ms median** (the same
+tick) at **175 bytes** mean, versus 462 bytes and a blocking request per sample
+for the polled form. Same data rate, but nothing waits and nothing reconnects.
+
+Two behavioural differences to design around: updates are **deltas**, so the
+client must hold state and merge rather than replace; and an idle printer sends
+**nothing at all** — subscribing and watching a stationary machine for six
+seconds produced zero pushes. There is no heartbeat, so liveness needs the
+websocket's own ping/pong. Needs a websocket client, which is not vendored.
+
+**Then, optionally, shorten the tick.** `SUBSCRIPTION_REFRESH_TIME` is a module
+global read on every `_do_query`, so it can be changed at runtime — not from a
+`gcode_macro` (Jinja cannot import or rebind globals) but from a small Klipper
+`extras` plugin, which can `import webhooks` the same way `motion_report.py`
+does `import chelper`:
+
+```python
+# klippy/extras/query_refresh.py
+import webhooks
+class QueryRefresh:
+    def __init__(self, config):
+        config.get_printer().lookup_object('gcode').register_command(
+            'SET_QUERY_REFRESH', self.cmd, desc="Set status refresh period")
+    def cmd(self, gcmd):
+        webhooks.SUBSCRIPTION_REFRESH_TIME = gcmd.get_float(
+            'PERIOD', minval=0.02, maxval=2.)
+def load_config(config): return QueryRefresh(config)
+```
+
+The cost is smaller than it looks: a status pass over **all 495** objects on
+this machine measures **~3.7ms**, and most of that is encoding the 437KB
+response that only a full poll receives — a subscriber's delta pass is far
+cheaper. At a 100ms tick that is a low single-digit percentage of the reactor.
+
+But it applies to **every client on the printer**, and it runs inside
+`reactor.assert_no_pause()`, so it is non-yielding work made more frequent
+while the host is also feeding the step queue. And on its own it does not help
+a polling client, which would then need to poll at 10Hz with a TCP connect
+each time.
+
+So: subscription first, because it makes a shorter tick free for this device
+rather than merely faster.
 
 ## The projection
 
