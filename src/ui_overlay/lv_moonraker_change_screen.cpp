@@ -90,10 +90,14 @@ void lv_loop_moonraker_change_screen(void) {
 
     static lv_screen_state_t screen_state = LV_SCREEN_STATE_INIT;
 
-    /* The probing and qgling states draw the live toolhead scene instead of a
+    /* Homing, probing and qgling draw the live toolhead scene instead of a
      * gif. One place decides that, so the scene can never be left up after the
-     * state it belongs to has ended. */
-    lv_toolhead_scene_set_active(moonraker.data.probing || moonraker.data.qgling);
+     * state it belongs to has ended, and the order matches the branches below
+     * so the label always names the state actually being shown. */
+    lv_toolhead_scene_set_mode(
+        moonraker.data.homing  ? TOOLHEAD_SCENE_HOMING  :
+        moonraker.data.probing ? TOOLHEAD_SCENE_PROBING :
+        moonraker.data.qgling  ? TOOLHEAD_SCENE_QGL     : TOOLHEAD_SCENE_OFF);
 
     // if (moonraker.data.printing) {
     //     if (lv_screen_state == 0) {
@@ -101,11 +105,12 @@ void lv_loop_moonraker_change_screen(void) {
     //         return;
     //     }
     // }
+    // NULL gif: the scene owns what is drawn here, not lv_gif
     if (moonraker.data.homing) {
-        lv_goto_busy_screen(ui_ScreenMainGif, LV_MOONRAKER_STATE_HOMING, &gif_homing);
+        lv_goto_busy_screen(ui_ScreenMainGif, LV_MOONRAKER_STATE_HOMING, NULL);
+        lv_toolhead_scene_update();
         return;
     }
-    // NULL gif: the scene owns what is drawn here, not lv_gif
     if (moonraker.data.probing) {
         lv_goto_busy_screen(ui_ScreenMainGif, LV_MOONRAKER_STATE_PROBING, NULL);
         lv_toolhead_scene_update();

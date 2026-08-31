@@ -25,6 +25,8 @@ SPRITES = REPO / 'src' / 'sprites'
 
 SCREEN = 240
 SCENE_BED_Y = 138
+LABEL_GAP = 8
+HOME_Z_MM = 15.0
 Z_NEAR_PX_PER_MM = 1.35
 Z_MAX_PX = 45.0
 
@@ -90,7 +92,7 @@ def place(u, v, z):
     return head_xy, sp, contact, (sw, max(3, sw // 3))
 
 
-def frame(u, v, z, label):
+def frame(u, v, z, label, state=None):
     im = Image.new('RGBA', (SCREEN, SCREEN), (0, 0, 0, 255))
     d = ImageDraw.Draw(im)
     d.ellipse([0, 0, SCREEN - 1, SCREEN - 1], outline=(40, 40, 40, 255))
@@ -109,6 +111,17 @@ def frame(u, v, z, label):
 
     im.alpha_composite(bed, (BED_X, SCENE_BED_Y))
     im.alpha_composite(sp, head_xy)
+
+    if state:
+        # the firmware uses montserrat_16; PIL's default is smaller, so this
+        # checks placement rather than exact metrics. The box is the real
+        # 16px-tall extent the label will occupy.
+        top = SCENE_BED_Y + C['SB_BED_H'] + LABEL_GAP
+        d.text((SCREEN // 2, top + 8), state, fill=(255, 255, 255, 255),
+               anchor='mm')
+        d.rectangle([SCREEN // 2 - 34, top, SCREEN // 2 + 34, top + 16],
+                    outline=(60, 60, 60, 255))
+
     d.text((4, 4), label, fill=(200, 200, 200, 255))
     return im, head_xy, sp
 
@@ -121,11 +134,23 @@ def main():
         for z in (0, 10, 50):
             u = (X - AXIS_MIN[0]) / (AXIS_MAX[0] - AXIS_MIN[0])
             v = (Y - AXIS_MIN[1]) / (AXIS_MAX[1] - AXIS_MIN[1])
-            cases.append((u, v, z, f'{name} Z{z}'))
+            cases.append((u, v, z, f'{name} Z{z}', 'Probing'))
+
+    # the homing sweep, as homing_target() computes it: X sweeps first from
+    # centre, then Y, then Z descends at bed centre
+    for lbl, (u, v, z) in [
+            ('home X start',  (0.50, 0.50, HOME_Z_MM)),
+            ('home X mid',    (0.75, 0.50, HOME_Z_MM)),
+            ('home X done',   (1.00, 0.50, HOME_Z_MM)),
+            ('home Y mid',    (1.00, 0.75, HOME_Z_MM)),
+            ('home Y done',   (1.00, 1.00, HOME_Z_MM)),
+            ('home Z centre', (0.50, 0.50, HOME_Z_MM)),
+            ('home Z touch',  (0.50, 0.50, 0.0))]:
+        cases.append((u, v, z, lbl, 'Homing'))
 
     tiles, worst = [], 0.0
-    for u, v, z, label in cases:
-        im, (hx, hy), sp = frame(u, v, z, label)
+    for u, v, z, label, state in cases:
+        im, (hx, hy), sp = frame(u, v, z, label, state)
         # furthest opaque pixel from the display centre
         a = np.array(sp)
         ys, xs = np.where(a[:, :, 3] > 10)

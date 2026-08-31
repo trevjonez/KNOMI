@@ -192,7 +192,8 @@ void MOONRAKER::get_status_and_position(void) {
     String knomi_status = send_request("GET",
         "/printer/objects/query?gcode_macro%20_KNOMI_STATUS"
         "&motion_report=live_position"
-        "&toolhead=axis_minimum,axis_maximum");
+        "&toolhead=axis_minimum,axis_maximum,homed_axes"
+        "&gcode_macro%20_KNOMI_HOME_INFO");
     if (!knomi_status.isEmpty()) {
         DynamicJsonDocument json_parse(knomi_status.length() * 2);
         deserializeJson(json_parse, knomi_status);
@@ -214,6 +215,37 @@ void MOONRAKER::get_status_and_position(void) {
             data.bounds_valid = (data.axis_max[0] > data.axis_min[0]) &&
                                 (data.axis_max[1] > data.axis_min[1]);
         }
+        String homed = json_parse["result"]["status"]["toolhead"]["homed_axes"].as<String>();
+        if (homed == "null") homed = "";
+        strlcpy(data.homed_axes, homed.c_str(), sizeof(data.homed_axes));
+
+        /* Remember where each axis was while Klipper still vouched for it.
+         * Recorded here rather than in the scene because it has to keep
+         * accruing while the scene is off -- idle is exactly when the
+         * position is known and worth keeping. */
+        if (data.pos_valid) {
+            const char * axis = "xyz";
+            for (uint8_t i = 0; i < 3; i++) {
+                if (strchr(data.homed_axes, axis[i])) {
+                    data.last_known[i] = data.pos[i];
+                    data.last_known_valid[i] = true;
+                }
+            }
+        }
+
+        JsonVariant hi = json_parse["result"]["status"]["gcode_macro _KNOMI_HOME_INFO"];
+        if (hi["ready"].as<bool>()) {
+            data.home_info.home[0] = hi["x_home"].as<float>();
+            data.home_info.home[1] = hi["y_home"].as<float>();
+            data.home_info.speed[0] = hi["x_speed"].as<float>();
+            data.home_info.speed[1] = hi["y_speed"].as<float>();
+            data.home_info.speed[2] = hi["z_speed"].as<float>();
+            // a zero speed would divide by zero downstream; treat it as absent
+            data.home_info.valid = data.home_info.speed[0] > 0.0f &&
+                                   data.home_info.speed[1] > 0.0f &&
+                                   data.home_info.speed[2] > 0.0f;
+        }
+        data.seq++;
 
         data.homing = json_parse["result"]["status"]["gcode_macro _KNOMI_STATUS"]["homing"].as<bool>();
         data.probing = json_parse["result"]["status"]["gcode_macro _KNOMI_STATUS"]["probing"].as<bool>();
@@ -247,7 +279,7 @@ void MOONRAKER::get_status_and_position(void) {
  * sets unconnected from inside send_request(), and the state flags that end
  * this branch come from the one query that is still being made. */
 static inline bool live_scene_state(const moonraker_data_t & d) {
-    return d.probing || d.qgling;
+    return d.homing || d.probing || d.qgling;
 }
 
 void MOONRAKER::http_get_loop(void) {

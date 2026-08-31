@@ -36,6 +36,37 @@ typedef struct {
     bool pos_valid;
     bool bounds_valid;
 
+    /* Which axes Klipper considers homed, e.g. "" / "x" / "xy" / "xyz".
+     * Position for an axis not listed here is meaningless, which is the whole
+     * problem the homing animation exists to paper over. */
+    char homed_axes[8];
+
+    /* Last position each axis was seen at while it was homed, kept per axis.
+     *
+     * A Klipper restart forgets where the toolhead is; the toolhead does not
+     * move because of it. Holding the last trustworthy reading here means the
+     * homing animation can start from roughly the truth instead of from the
+     * middle of the bed. Survives a Klipper or Moonraker restart, not a KNOMI
+     * reboot -- after that the head may have been moved by hand anyway, and
+     * bed centre is the honest answer. */
+    float last_known[3];
+    bool last_known_valid[3];
+
+    /* Published by the _KNOMI_HOME_INFO macro in voron_knomi.cfg, which
+     * derives them from the live printer.cfg at startup. Absent on a printer
+     * without that macro, in which case the scene uses compiled-in defaults. */
+    struct {
+        bool valid;
+        float home[2];    // where X and Y land when homed, mm
+        float speed[3];   // homing_speed per axis, mm/s
+    } home_info;
+
+    /* Bumped on every successful status query. The scene retargets on this
+     * rather than on the position changing: during homing its target is a
+     * function of time, so "has the value changed" cannot distinguish a fresh
+     * sample from the same one seen again at UI rate. */
+    uint32_t seq;
+
     bool pause;
     bool printing;    // is klipper in a printing task (including printing, pausing, paused, cancelling)
     bool homing;

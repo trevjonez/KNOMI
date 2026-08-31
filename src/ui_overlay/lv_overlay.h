@@ -9,7 +9,6 @@ extern const lv_img_dsc_t * gif_idle[];
 LV_IMG_DECLARE(gif_welcome);
 LV_IMG_DECLARE(gif_voron);
 LV_IMG_DECLARE(gif_standby);
-LV_IMG_DECLARE(gif_homing);
 LV_IMG_DECLARE(gif_heated);
 LV_IMG_DECLARE(gif_print);
 LV_IMG_DECLARE(gif_print_ok);
@@ -43,9 +42,15 @@ void lv_loop_auto_idle(wifi_status_t status);
 // lv_roller.cpp -- roller list fetch, split across tasks
 void lv_roller_fetch_pending(void);   // moonraker_task: does the blocking HTTP
 void lv_roller_poll_fetch(void);      // UI task: applies the result to LVGL
-// lv_toolhead_scene.cpp -- live position scene, replaces the probing/qgling gifs
+// lv_toolhead_scene.cpp -- live position scene, replaces the homing/probing/qgling gifs
+typedef enum {
+    TOOLHEAD_SCENE_OFF = 0,
+    TOOLHEAD_SCENE_HOMING,
+    TOOLHEAD_SCENE_PROBING,
+    TOOLHEAD_SCENE_QGL,
+} toolhead_scene_mode_t;
 void lv_toolhead_scene_init(lv_obj_t * parent);
-void lv_toolhead_scene_set_active(bool active);
+void lv_toolhead_scene_set_mode(toolhead_scene_mode_t mode);
 void lv_toolhead_scene_update(void);
 
 #endif
