@@ -38,6 +38,21 @@
 // gap between the bottom of the bed slab and the state label
 #define SCENE_LABEL_GAP 8
 
+/* The bed art's own top-face red, sampled from the sprite (#C02F30, 1492px,
+ * its most common colour; the slab below it is the darker #AC1C1D).
+ *
+ * Written as a literal rather than lv_theme_color() on purpose: the bed is
+ * fixed artwork, so if the user retheme the UI the label must stay matched to
+ * the bed rather than drifting away from it. It happens to equal
+ * LV_32BIT_BTT_RED, which is where BTT took the theme default from. */
+#define SCENE_LABEL_COLOR 0xC02F30
+
+/* LVGL 8.3 ships Montserrat in regular only -- there is no bold face to
+ * select and no synthetic bold. Drawing the text twice, offset one pixel,
+ * thickens the stems and is the usual way to get a bold-ish look without
+ * adding a converted font to the build. */
+#define SCENE_LABEL_EMBOSS_PX 1
+
 /* Z rendered with a soft ceiling: linear near the bed at SCENE_Z_NEAR_PX_PER_MM,
  * bending over to approach SCENE_Z_MAX_PX asymptotically so a park at Z=250
  * compresses instead of flying off the top of the screen.
@@ -55,41 +70,31 @@
 #define SCENE_LERP_MIN_MS  80
 #define SCENE_LERP_MAX_MS  700
 
-/* Homing sweep.
+/* Homing.
  *
- * While an axis is unhomed the printer does not know where the toolhead is,
- * so neither do we. Two things narrow the guess to something usually true:
+ * Not a guess at all -- see homing_target(). Klipper reports a fictitious
+ * position while homing, but one that is offset from the truth by a constant,
+ * so the distance it covers is real and can be added to where the toolhead
+ * was last seen (moonraker.data.last_known) to recover where it is now.
  *
- *   where it starts   moonraker.data.last_known -- the last position each
- *                     axis was seen at while homed. A Klipper restart forgets
- *                     the position but does not move the toolhead, so this is
- *                     still right afterwards. Falls back to bed centre.
- *   where it is going and how fast: the _KNOMI_HOME_INFO macro publishes
- *                     position_endstop and homing_speed straight out of the
- *                     live printer.cfg, so editing that config is enough --
- *                     no reflash. Falls back to the constants below.
- *
- * With both, the sweep is not an estimate at all: duration is the distance
- * actually to be travelled over the actual homing speed. And it never has to
- * be right, because the moment Klipper reports an axis homed that axis
- * switches to real position and eases into it -- guess long and it lands
- * early, guess short and it waits at the endstop. */
+ * The only thing needed from the printer is a plausible homing speed, used to
+ * recognise the discontinuity when the endstop trips. _KNOMI_HOME_INFO
+ * publishes that from the live printer.cfg, so retuning the machine needs no
+ * reflash; the constants below cover a printer without that macro. */
 
-/* Used only until _KNOMI_HOME_INFO answers. Values for a Voron 2.4, whose X
- * and Y both home to maximum (position_endstop == position_max). */
+/* Used only until _KNOMI_HOME_INFO answers. Voron 2.4 values. */
 #define SCENE_HOME_FALLBACK_XY_SPEED  40.0f   // mm/s
 #define SCENE_HOME_FALLBACK_Z_SPEED    8.0f   // mm/s
-#define SCENE_HOME_FALLBACK_TARGET_U   1.0f   // 1 = toward max, 0 = toward min
-#define SCENE_HOME_FALLBACK_TARGET_V   1.0f
 
-/* Where the head floats while Z is still unknown, mm. Also the height the Z
- * sweep descends from, so it doubles as the distance that sweep represents. */
+/* Where the head floats while Z is still unknown, mm. */
 #define SCENE_HOME_Z_MM         15.0f
 
-/* Bounds on a computed sweep, ms. A very short home move should still be
- * visible as motion; a very long one should not outlast anyone's patience. */
-#define SCENE_HOME_SWEEP_MIN_MS  400
-#define SCENE_HOME_SWEEP_MAX_MS  12000
+/* A jump larger than the axis could have travelled between two samples means
+ * the endstop triggered and Klipper snapped the position to the real one.
+ * Generous multiple of speed x interval, with a floor so a slow axis sampled
+ * quickly still has room for ordinary jitter. */
+#define SCENE_HOME_SNAP_FACTOR   3.0f
+#define SCENE_HOME_SNAP_MIN_MM   5.0f
 
 typedef struct {
     float u;    // 0..1 across the bed, left to right
@@ -101,6 +106,7 @@ static lv_obj_t * scene_bed = NULL;
 static lv_obj_t * scene_shadow = NULL;
 static lv_obj_t * scene_head = NULL;
 static lv_obj_t * scene_label = NULL;
+static lv_obj_t * scene_label_emboss = NULL;
 static lv_anim_t scene_anim;
 static toolhead_scene_mode_t scene_mode = TOOLHEAD_SCENE_OFF;
 
@@ -112,11 +118,18 @@ static bool scene_active = false;
 static uint32_t last_sample_ms = 0;
 static uint32_t last_seq = 0;
 
-// homing sweep state: which axis is in flight, and when that phase started
-static uint8_t home_phase = 0;
-static uint32_t home_phase_ms = 0;
-
 static void scene_visibility(bool active);
+static void home_reset(void);
+
+/* Set both copies of the state label and re-centre them. Width changes with
+ * the text, so alignment has to be redone every time it changes. */
+static void scene_label_set(const char * txt) {
+    const int y = SCENE_BED_Y + SB_BED_H + SCENE_LABEL_GAP;
+    lv_label_set_text(scene_label_emboss, txt);
+    lv_label_set_text(scene_label, txt);
+    lv_obj_align(scene_label_emboss, LV_ALIGN_TOP_MID, SCENE_LABEL_EMBOSS_PX, y);
+    lv_obj_align(scene_label, LV_ALIGN_TOP_MID, 0, y);
+}
 static float home_start(uint8_t axis);
 
 static inline float clampf(float v, float lo, float hi) {
@@ -215,13 +228,16 @@ void lv_toolhead_scene_init(lv_obj_t * parent) {
     scene_head = lv_img_create(parent);
     lv_img_set_src(scene_head, sb_head[SB_HEAD_COUNT - 1]);
 
-    // names the state, under the bed
+    // names the state, under the bed; the emboss copy is created first so it
+    // sits underneath, offset a pixel to thicken the stems
+    scene_label_emboss = lv_label_create(parent);
     scene_label = lv_label_create(parent);
-    lv_obj_set_style_text_font(scene_label, &lv_font_montserrat_16, 0);
-    lv_obj_set_style_text_color(scene_label, lv_color_white(), 0);
-    lv_label_set_text(scene_label, "");
-    lv_obj_align(scene_label, LV_ALIGN_TOP_MID, 0,
-                 SCENE_BED_Y + SB_BED_H + SCENE_LABEL_GAP);
+    for (lv_obj_t * l : {scene_label_emboss, scene_label}) {
+        lv_obj_set_style_text_font(l, &lv_font_montserrat_20, 0);
+        lv_obj_set_style_text_color(l, lv_color_hex(SCENE_LABEL_COLOR), 0);
+        lv_label_set_text(l, "");
+    }
+    scene_label_set("");
 
     lv_anim_init(&scene_anim);
     lv_anim_set_var(&scene_anim, scene_head);
@@ -269,11 +285,13 @@ static void scene_visibility(bool active) {
         lv_obj_clear_flag(scene_bed, LV_OBJ_FLAG_HIDDEN);
         lv_obj_clear_flag(scene_head, LV_OBJ_FLAG_HIDDEN);
         lv_obj_clear_flag(scene_label, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_clear_flag(scene_label_emboss, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(ui_img_main_gif, LV_OBJ_FLAG_HIDDEN);
     } else {
         lv_obj_add_flag(scene_bed, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(scene_head, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(scene_label, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(scene_label_emboss, LV_OBJ_FLAG_HIDDEN);
         lv_obj_clear_flag(ui_img_main_gif, LV_OBJ_FLAG_HIDDEN);
     }
     scene_gif_decode(!active);
@@ -287,11 +305,8 @@ void lv_toolhead_scene_set_mode(toolhead_scene_mode_t mode) {
     scene_active = (mode != TOOLHEAD_SCENE_OFF);
 
     if (scene_active) {
-        lv_label_set_text(scene_label,
-            mode == TOOLHEAD_SCENE_HOMING  ? "Homing" :
-            mode == TOOLHEAD_SCENE_PROBING ? "Probing" : "QGL");
-        lv_obj_align(scene_label, LV_ALIGN_TOP_MID, 0,
-                     SCENE_BED_Y + SB_BED_H + SCENE_LABEL_GAP);
+        scene_label_set(mode == TOOLHEAD_SCENE_HOMING  ? "Homing" :
+                        mode == TOOLHEAD_SCENE_PROBING ? "Probing" : "QGL");
     }
 
     if (scene_active && !was_active) {
@@ -307,20 +322,35 @@ void lv_toolhead_scene_set_mode(toolhead_scene_mode_t mode) {
                                                : SCENE_HOME_Z_MM };
         scene_apply(&pos_now);
     }
-    /* Invalidate the sweep clock on every entry to homing, not just when the
-     * scene was off: probing -> homing keeps the scene up, and a stale
-     * home_phase_ms there would start the sweep already finished. */
-    if (mode == TOOLHEAD_SCENE_HOMING) home_phase = 0xFF;
+    /* Drop any ramp state on every entry to homing, not just when the scene
+     * was off: probing -> homing keeps the scene up, and a latch left over
+     * from a previous G28 would reconstruct against a stale origin. */
+    if (mode == TOOLHEAD_SCENE_HOMING) home_reset();
     if (!scene_active) lv_anim_del(scene_head, scene_anim_cb);
     if (scene_active != was_active) scene_visibility(scene_active);
 }
 
-/* Linear ramp from a to b over span_ms, holding at b once it arrives. Linear
- * rather than eased because it stands in for a homing move, which runs at a
- * constant speed. */
-static float sweep(float a, float b, uint32_t elapsed, uint32_t span_ms) {
-    if (elapsed >= span_ms) return b;
-    return a + (b - a) * ((float)elapsed / (float)span_ms);
+/* Per-axis reconstruction state for a homing move. */
+typedef struct {
+    bool  ramping;      // Klipper has force-set this axis and is homing it
+    float origin;       // the force-set reading the ramp started from
+    float start;        // where the toolhead really was at that moment
+    float prev;         // previous live reading, for snap detection
+    bool  have_prev;
+} home_axis_t;
+static home_axis_t home_axis[3];
+static uint32_t home_prev_ms = 0;
+
+static void home_reset(void) {
+    memset(home_axis, 0, sizeof(home_axis));
+    home_prev_ms = 0;
+}
+
+static float home_speed(uint8_t axis) {
+    const moonraker_data_t & d = moonraker.data;
+    if (d.home_info.valid && d.home_info.speed[axis] > 0.0f)
+        return d.home_info.speed[axis];
+    return axis == 2 ? SCENE_HOME_FALLBACK_Z_SPEED : SCENE_HOME_FALLBACK_XY_SPEED;
 }
 
 /* Target while homing.
@@ -339,57 +369,68 @@ static float home_start(uint8_t axis) {
     return clampf((d.last_known[axis] - lo) / (hi - lo), 0.0f, 1.0f);
 }
 
-/* Normalised endstop for an unhomed axis, from the printer if it says. */
-static float home_end(uint8_t axis) {
+/* Reconstruct where the toolhead really is during a homing move.
+ *
+ * Klipper does not report an unknown position while homing -- it reports a
+ * fictitious one. To home an axis it force-sets the position to
+ * `endstop -/+ 1.5 x travel`, well outside the axis range, then ramps toward
+ * the endstop until the switch trips. Measured on this machine, homing X
+ * jumps live_position to -183 and ramps to 351 over ~9s.
+ *
+ * That reading is not noise: it is offset from the truth by a constant, since
+ * the ramp and the toolhead travel together. So the distance covered,
+ * live - origin, is real, and adding it to where the head actually was
+ * reconstructs where it actually is. No timed guess needed -- the animation
+ * is driven by measured motion.
+ *
+ * Note homed_axes is useless here. It flips to "homed" when the force-set
+ * happens, i.e. at the START of the move, and on a machine that was already
+ * homed it never changes at all -- confirmed on hardware, it read "xyz"
+ * unchanged through an entire G28 X. Relying on it is what made the head sit
+ * pinned at the bed edge: the clamped -183 stayed put until the ramp climbed
+ * back into range. */
+static scene_pos_t homing_target(void) {
     const moonraker_data_t & d = moonraker.data;
-    if (!d.home_info.valid)
-        return axis == 0 ? SCENE_HOME_FALLBACK_TARGET_U : SCENE_HOME_FALLBACK_TARGET_V;
-    float lo = d.axis_min[axis], hi = d.axis_max[axis];
-    return clampf((d.home_info.home[axis] - lo) / (hi - lo), 0.0f, 1.0f);
-}
+    uint32_t now = millis();
+    float dt = home_prev_ms ? (now - home_prev_ms) / 1000.0f : 0.25f;
+    if (dt <= 0.0f || dt > 2.0f) dt = 0.25f;
+    home_prev_ms = now;
 
-/* How long a move of mm at this axis's homing speed takes. */
-static uint32_t home_span(uint8_t axis, float mm) {
-    const moonraker_data_t & d = moonraker.data;
-    float speed = d.home_info.valid ? d.home_info.speed[axis]
-                : (axis == 2 ? SCENE_HOME_FALLBACK_Z_SPEED
-                             : SCENE_HOME_FALLBACK_XY_SPEED);
-    if (speed <= 0.0f) speed = SCENE_HOME_FALLBACK_XY_SPEED;
-    float ms = fabsf(mm) / speed * 1000.0f;
-    if (ms < SCENE_HOME_SWEEP_MIN_MS) ms = SCENE_HOME_SWEEP_MIN_MS;
-    if (ms > SCENE_HOME_SWEEP_MAX_MS) ms = SCENE_HOME_SWEEP_MAX_MS;
-    return (uint32_t)ms;
-}
+    float out[3];
+    for (uint8_t i = 0; i < 3; i++) {
+        float lo = d.axis_min[i], hi = d.axis_max[i];
+        float p = d.pos[i];
+        home_axis_t * a = &home_axis[i];
 
-/* Sweep one normalised axis from where it was last seen to its endstop, paced
- * by the real distance between them at the real homing speed. */
-static float home_sweep(uint8_t axis, uint32_t t) {
-    float a = home_start(axis), b = home_end(axis);
-    float span_mm = (b - a) * (moonraker.data.axis_max[axis] - moonraker.data.axis_min[axis]);
-    return sweep(a, b, t, home_span(axis, span_mm));
-}
+        /* A step no axis could physically make means the endstop tripped and
+         * Klipper replaced the fiction with the truth. From here the reading
+         * is real -- which also matters for what follows, since G28 moves to
+         * bed centre before homing Z. */
+        if (a->ramping && a->have_prev) {
+            float limit = home_speed(i) * dt * SCENE_HOME_SNAP_FACTOR;
+            if (limit < SCENE_HOME_SNAP_MIN_MM) limit = SCENE_HOME_SNAP_MIN_MM;
+            if (fabsf(p - a->prev) > limit) a->ramping = false;
+        }
+        // outside its own limits, an axis can only be mid force-set ramp
+        if (!a->ramping && (p < lo || p > hi)) {
+            a->ramping = true;
+            a->origin = p;
+            a->start = d.last_known_valid[i] ? d.last_known[i] : (lo + hi) * 0.5f;
+        }
+        a->prev = p;
+        a->have_prev = true;
 
-static scene_pos_t homing_target(const scene_pos_t * live) {
-    const char * ha = moonraker.data.homed_axes;
-    bool has_x = strchr(ha, 'x') != NULL;
-    bool has_y = strchr(ha, 'y') != NULL;
-    bool has_z = strchr(ha, 'z') != NULL;
-
-    uint8_t phase = !has_x ? 0 : (!has_y ? 1 : 2);
-    if (phase != home_phase) {
-        home_phase = phase;
-        home_phase_ms = millis();
+        out[i] = a->ramping ? clampf(a->start + (p - a->origin), lo, hi) : p;
     }
-    uint32_t t = millis() - home_phase_ms;
 
-    scene_pos_t p;
-    p.u = has_x ? live->u : home_sweep(0, t);
-    p.v = has_y ? live->v : (has_x ? home_sweep(1, t) : home_start(1));
-    p.z = has_z ? live->z
-                : (has_y ? sweep(SCENE_HOME_Z_MM, 0.0f, t,
-                                 home_span(2, SCENE_HOME_Z_MM))
-                         : SCENE_HOME_Z_MM);
-    return p;
+    scene_pos_t r;
+    r.u = clampf((out[0] - d.axis_min[0]) / (d.axis_max[0] - d.axis_min[0]), 0.0f, 1.0f);
+    r.v = clampf((out[1] - d.axis_min[1]) / (d.axis_max[1] - d.axis_min[1]), 0.0f, 1.0f);
+    /* Z reconstructs the same way -- the tap descends as far kinematically as
+     * it does physically, so the nozzle is shown genuinely closing on the bed
+     * rather than dropping on a timer. */
+    r.z = out[2] < 0.0f ? 0.0f : out[2];
+    return r;
 }
 
 void lv_toolhead_scene_update(void) {
@@ -410,7 +451,7 @@ void lv_toolhead_scene_update(void) {
         .v = clampf((moonraker.data.pos[1] - lo[1]) / (hi[1] - lo[1]), 0.0f, 1.0f),
         .z = moonraker.data.pos[2] < 0.0f ? 0.0f : moonraker.data.pos[2],
     };
-    if (scene_mode == TOOLHEAD_SCENE_HOMING) sample = homing_target(&sample);
+    if (scene_mode == TOOLHEAD_SCENE_HOMING) sample = homing_target();
 
     // ignore a repeat of the sample we are already heading for, so a stationary
     // toolhead does not restart the easing every cycle

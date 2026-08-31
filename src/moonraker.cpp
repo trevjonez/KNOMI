@@ -222,11 +222,29 @@ void MOONRAKER::get_status_and_position(void) {
         /* Remember where each axis was while Klipper still vouched for it.
          * Recorded here rather than in the scene because it has to keep
          * accruing while the scene is off -- idle is exactly when the
-         * position is known and worth keeping. */
-        if (data.pos_valid) {
+         * position is known and worth keeping.
+         *
+         * Never during a G28. homed_axes cannot be used to tell a real
+         * position from Klipper's homing fiction: it keeps claiming the axis
+         * is homed throughout the move, and on a machine that was already
+         * homed it does not change at all. Recording then would overwrite the
+         * one value the homing animation needs -- where the head was before
+         * the move began -- with the force-set coordinate, which collapses
+         * the reconstruction back to the raw reading.
+         *
+         * Read from this sample's JSON rather than data.homing, which still
+         * holds the previous cycle's value at this point.
+         *
+         * The range test is a second guard: a force-set coordinate always
+         * lands outside the axis's own limits. */
+        bool homing_now = json_parse["result"]["status"]
+                                    ["gcode_macro _KNOMI_STATUS"]["homing"].as<bool>();
+        if (data.pos_valid && data.bounds_valid && !homing_now) {
             const char * axis = "xyz";
             for (uint8_t i = 0; i < 3; i++) {
-                if (strchr(data.homed_axes, axis[i])) {
+                if (strchr(data.homed_axes, axis[i]) &&
+                    data.pos[i] >= data.axis_min[i] &&
+                    data.pos[i] <= data.axis_max[i]) {
                     data.last_known[i] = data.pos[i];
                     data.last_known_valid[i] = true;
                 }
