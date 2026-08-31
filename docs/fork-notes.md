@@ -39,6 +39,15 @@ SRAM, with a PSRAM fallback if the allocation fails. `LV_MEM_CUSTOM_ALLOC` stays
 on `ps_malloc`: the object tree and GIF decode buffers are fine there, it was
 only the hot draw path that was not.
 
+**The Moonraker connection is held open.** Every request used to build its own
+`HTTPClient`, so every sample paid a TCP handshake — invisible while Klipper's
+250ms status tick dominated, but the limiting cost once that tick is shortened,
+and most of the reason the radio was busy. One connection now serves 100+
+responses. Note `HTTPClient::end()` closes the socket whatever `setReuse()`
+says, so it is called only on failure. Scoped to the status path, which lives
+entirely in `moonraker_task`; POSTs run on another task and keep their own
+client, since one `HTTPClient` cannot be driven from two tasks.
+
 **Input polled at 10ms** (`LV_INDEV_DEF_READ_PERIOD`), with the CST816S report
 rate matched to it.
 
@@ -88,6 +97,16 @@ that ever needs to be distinguishable remotely.
 
 ## Klipper side
 
-`_KNOMI_HOME_INFO` is optional but improves homing accuracy; see
-[toolhead-scene.md](toolhead-scene.md#what-the-printer-still-has-to-tell-us).
-Nothing else in this fork requires config changes beyond stock `KNOMI.cfg`.
+Two optional additions, both in `trevjonez/klipper-configs`:
+
+* **`_KNOMI_HOME_INFO`** publishes homing speeds out of the live `printer.cfg`
+  so the display need not assume them. Without it the firmware falls back to
+  Voron 2.4 defaults.
+* **`knomi_query_refresh`**, a small Klipper extra, raises Klipper's status
+  refresh rate for the span of an animated state and restores it after. It has
+  to move **two** module globals — `webhooks.SUBSCRIPTION_REFRESH_TIME` and
+  `motion_report.STATUS_REFRESH_TIME` — because the first governs how often
+  status is served and the second how often position is recomputed. Changing
+  only one makes clients fetch the same value more often and improves nothing.
+
+Neither is required; stock `KNOMI.cfg` works.

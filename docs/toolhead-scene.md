@@ -90,58 +90,74 @@ status collection cannot yield into motion-critical work. Subscribers receive
 only changed fields. A query storm therefore cannot make Klipper do more work —
 extra clients ride the tick that was already scheduled.
 
-**So 4Hz is not a limit imposed on us, it is the granularity of Klipper's
-status for everyone.** Polling harder just queues more waiters onto the same
-tick. The scene can be up to 250ms stale, and no faster host, network or
-Moonraker changes that.
+### There are TWO 250ms periods, and they must move together
 
-### If it ever needs to be faster
-
-Two levers, and they compose in one order only.
-
-**Subscribe instead of poll.** Measured against `printer.objects.subscribe`
-while the toolhead was moving: pushes arrive every **251ms median** (the same
-tick) at **175 bytes** mean, versus 462 bytes and a blocking request per sample
-for the polled form. Same data rate, but nothing waits and nothing reconnects.
-
-Two behavioural differences to design around: updates are **deltas**, so the
-client must hold state and merge rather than replace; and an idle printer sends
-**nothing at all** — subscribing and watching a stationary machine for six
-seconds produced zero pushes. There is no heartbeat, so liveness needs the
-websocket's own ping/pong. Needs a websocket client, which is not vendored.
-
-**Then, optionally, shorten the tick.** `SUBSCRIPTION_REFRESH_TIME` is a module
-global read on every `_do_query`, so it can be changed at runtime — not from a
-`gcode_macro` (Jinja cannot import or rebind globals) but from a small Klipper
-`extras` plugin, which can `import webhooks` the same way `motion_report.py`
-does `import chelper`:
+This is the part that cost a debugging session. `SUBSCRIPTION_REFRESH_TIME`
+governs how often status is **served**. `STATUS_REFRESH_TIME` in
+`extras/motion_report.py`, also 0.250, governs how often `live_position` is
+**recomputed** — `get_status` returns a cached value until then:
 
 ```python
-# klippy/extras/query_refresh.py
-import webhooks
-class QueryRefresh:
-    def __init__(self, config):
-        config.get_printer().lookup_object('gcode').register_command(
-            'SET_QUERY_REFRESH', self.cmd, desc="Set status refresh period")
-    def cmd(self, gcmd):
-        webhooks.SUBSCRIPTION_REFRESH_TIME = gcmd.get_float(
-            'PERIOD', minval=0.02, maxval=2.)
-def load_config(config): return QueryRefresh(config)
+def get_status(self, eventtime):
+    if eventtime < self.next_status_time or not self.dtrapqs:
+        return self.last_status                       # cached
+    self.next_status_time = eventtime + STATUS_REFRESH_TIME
 ```
 
-The cost is smaller than it looks: a status pass over **all 495** objects on
-this machine measures **~3.7ms**, and most of that is encoding the 437KB
-response that only a full poll receives — a subscriber's delta pass is far
-cheaper. At a 100ms tick that is a low single-digit percentage of the reactor.
+Shortening only the first makes clients fetch the same number more often and
+improves nothing. Measured with just that changed: samples every **0.101s**
+while the value still changed only every **0.302s**, in 12.1mm steps. It also
+actively broke the homing detector, which was measuring rate per sample — see
+Traps below.
 
-But it applies to **every client on the printer**, and it runs inside
+**So 4Hz is the granularity of Klipper's status for everyone, not a limit
+imposed on this device.** No faster host, network or Moonraker changes it.
+
+### Making it faster, as actually done
+
+`klipper-configs/klippy_extras/knomi_query_refresh.py` rebinds **both** module
+globals at runtime, driven from `_KNOMI_QUERY_RATE` so the rate is raised only
+for the span of an animated state and restored after. Both are read per call
+rather than captured at startup, so rebinding takes effect on the next tick.
+This cannot be a `gcode_macro`: Klipper's Jinja can neither import nor rebind
+globals.
+
+0.10s is the measured knee, not a guess:
+
+| tick | KNOMI request rate | klippy CPU |
+|---|---|---|
+| 0.25 (stock) | 3.00/s | 14.1% |
+| 0.15 | 5.42/s | 18.3% |
+| **0.10** | **6.75/s** | **20.4%** |
+| 0.05 | 7.75/s | 24.9% |
+
+0.25 → 0.10 more than doubles the rate for +45% CPU; 0.10 → 0.05 buys 15% more
+for another 22%. Below ~0.10 Klipper generates ticks the device cannot consume.
+
+A status pass over all **495** objects here costs only **~3.7ms**, and most of
+that is encoding the 437KB response only a full poll receives. But it applies
+to **every client on the printer** and runs inside
 `reactor.assert_no_pause()`, so it is non-yielding work made more frequent
-while the host is also feeding the step queue. And on its own it does not help
-a polling client, which would then need to poll at 10Hz with a TCP connect
-each time.
+while the host feeds the step queue. Scoped to homing/probing/QGL it is
+seconds at a time, and the extra restores both periods on shutdown and
+disconnect so a macro that raises cannot leave the machine running fast.
 
-So: subscription first, because it makes a shorter tick free for this device
-rather than merely faster.
+The device side also holds its Moonraker connection open (`setReuse`, and
+crucially *not* calling `end()` on success, which closes the socket regardless).
+One connection served 100 responses where each sample previously paid a TCP
+handshake — ~30x fewer, and most of the reason the radio was busy.
+
+### Still on the table: subscribe instead of poll
+
+Measured against `printer.objects.subscribe` while the toolhead was moving:
+pushes every **251ms median** at **175 bytes**, versus 462 bytes and a blocking
+request per sample. Same data rate, but nothing waits.
+
+Two behaviours to design around: updates are **deltas**, so the client must
+hold state and merge rather than replace; and an idle printer sends **nothing
+at all** — six seconds watching a stationary machine produced zero pushes, so
+liveness needs the websocket's own ping/pong. Needs a websocket client, which
+is not vendored.
 
 ## The projection
 
@@ -200,7 +216,11 @@ No timer, no endstop positions, no assumed direction — the animation is driven
 by measured motion. `origin` is captured from the first reading that falls
 outside the axis limits, which only a force-set coordinate ever does.
 
-### Two traps
+### Traps
+
+Four, all of which shipped before being caught on hardware. Every one was
+found by capturing a real `G28` and replaying it offline, never by reasoning
+about what Klipper ought to report.
 
 **`homed_axes` cannot be used here.** It flips to "homed" when the force-set
 happens — the *start* of the move — and on a machine that was already homed it
@@ -215,13 +235,39 @@ So it absorbed the −183 at the same sample the ramp was latched, and
 reconstruction ran and did nothing. This fix is invisible in a diff of the
 reconstruction itself; it lives in `moonraker.cpp`.
 
-Replaying the captured trace through both versions:
+**The snap detector must measure rate per *change*, not per sample.** Klipper
+recomputes `live_position` on its own 250ms cycle — `STATUS_REFRESH_TIME` in
+`extras/motion_report.py` — and `get_status` returns a cached value until then.
+Poll faster than that and you get runs of identical values followed by one
+full-size step. Measured: samples every 0.101s, value changing every 0.302s in
+12.1mm steps. A per-sample threshold of `40 × 0.101 × 3` = 12.8mm against a
+real 12.1mm step is a 6% margin, and jitter tips it over — the ramp unlatches
+mid-sweep, relatches at the current reading, and the head jumps back to its
+start. Measuring per change reads 40mm/s at any poll rate.
+
+**The range test needs a margin, because `position_endstop` equals
+`position_max`.** X homes to 351 with a maximum of 351. The value Klipper
+snaps to on a trigger therefore lands a float-hair *above* the maximum and
+reads as a fresh force-set: the axis unlatches on the jump and relatches on the
+same sample with the endstop as its origin, rendering `20 + (341 − 351) = 10`
+and stranding the head at the left of the bed for the rest of the sequence.
+2mm of clearance separates it (the real force-set is ~500mm out), and the
+latch is skipped entirely on the sample that just snapped.
+
+Replaying the captured trace through the broken and fixed versions:
 
 | variant | samples pinned at bed edge | longest dwell |
 |---|---|---|
 | trust `live` | 19/39 | 4.8s |
 | reconstruct, `last_known` unguarded | 19/39 | 4.8s |
 | reconstruct + freeze `last_known` | 0/39 | 0.0s |
+
+and for the latch guards, what X shows while Y is homing:
+
+| variant | X during Y-home | X range over the G28 |
+|---|---|---|
+| no margin, no snap guard | never unlatches | −1 … 351 |
+| margin + guard | **341 (its real position)** | 20 … 351 |
 
 ### What the printer still has to tell us
 
@@ -284,6 +330,11 @@ All in `lv_toolhead_scene.cpp`:
   `.pio/build/<env>/lib*/lvgl`.
 - **LVGL has no bold Montserrat** and no synthetic bold. The label is drawn
   twice, one pixel apart.
+- **`FIRMWARE_RESTART` does not re-import Python modules.** It rebuilds the
+  config and the printer objects, but the module stays in `sys.modules`, so an
+  edited `extras/*.py` keeps running the old code — silently, with no error and
+  no warning. `sudo systemctl restart klipper` is required. Clearing
+  `__pycache__` does not help, because the stale module is already imported.
 - **Logs will not help you debug this.** Klipper logs no toolhead position
   during homing, and Moonraker's log holds only HTTP requests and connection
   events. `klippy.log` is good for the config Klipper actually parsed
